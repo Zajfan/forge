@@ -6,142 +6,97 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 
+#include <array>
 #include <format>
 #include <iostream>
-#include <array>
 
 namespace forge::editor {
 
 // ─── Colour palette ──────────────────────────────────────────────────────────
 
 static const std::array<glm::vec3, 8> kPalette = {{
-    { 0.72f, 0.70f, 0.65f },
-    { 0.55f, 0.50f, 0.45f },
-    { 0.80f, 0.75f, 0.60f },
-    { 0.40f, 0.45f, 0.55f },
-    { 0.65f, 0.58f, 0.50f },
-    { 0.50f, 0.60f, 0.50f },
-    { 0.60f, 0.50f, 0.55f },
-    { 0.45f, 0.55f, 0.65f },
+    { 0.72f, 0.70f, 0.65f }, { 0.55f, 0.50f, 0.45f },
+    { 0.80f, 0.75f, 0.60f }, { 0.40f, 0.45f, 0.55f },
+    { 0.65f, 0.58f, 0.50f }, { 0.50f, 0.60f, 0.50f },
+    { 0.60f, 0.50f, 0.55f }, { 0.45f, 0.55f, 0.65f },
 }};
 
 glm::vec3 EditorApp::materialColour(const std::string& id) const noexcept {
     return kPalette[std::hash<std::string>{}(id) % kPalette.size()];
 }
 
-void EditorApp::setStatus(std::string msg, float duration) {
+void EditorApp::setStatus(std::string msg, float dur) {
     statusMessage_ = std::move(msg);
-    statusTimer_   = duration;
+    statusTimer_   = dur;
+}
+
+// ─── World-to-screen helper ───────────────────────────────────────────────────
+
+static ImVec2 w2s(glm::vec3 wp, const glm::mat4& vp,
+                   ImVec2 pos, ImVec2 sz) noexcept {
+    const glm::vec4 c = vp * glm::vec4(wp, 1.f);
+    if (c.w < 1e-4f) return { -1e6f, -1e6f };
+    const glm::vec3 n = glm::vec3(c) / c.w;
+    return { pos.x + (n.x * .5f + .5f) * sz.x,
+             pos.y + (1.f - (n.y * .5f + .5f)) * sz.y };
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 bool EditorApp::init() {
-    // ── Window ────────────────────────────────────────────────────────────────
-    auto winResult = gfx::Window::create({
-        .title       = "FORGE Editor",
-        .width       = 1440,
-        .height      = 900,
-        .msaaSamples = 4,
-        .glMajor     = 4,
-        .glMinor     = 6,
-    });
-    if (!winResult) {
-        std::cerr << "[error] " << winResult.error() << '\n';
-        return false;
-    }
-    window_ = std::move(*winResult);
+    auto wr = gfx::Window::create({ .title="FORGE Editor",.width=1440,.height=900,.msaaSamples=4,.glMajor=4,.glMinor=6 });
+    if (!wr) { std::cerr << "[error] " << wr.error() << '\n'; return false; }
+    window_ = std::move(*wr);
 
-    // ── ImGui ─────────────────────────────────────────────────────────────────
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-
-    // Dark theme with editor tweaks
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding    = 4.f;
-    style.FrameRounding     = 3.f;
-    style.TabRounding       = 3.f;
-    style.ScrollbarRounding = 3.f;
-    style.Colors[ImGuiCol_WindowBg]  = { 0.12f, 0.12f, 0.13f, 1.f };
-    style.Colors[ImGuiCol_MenuBarBg] = { 0.10f, 0.10f, 0.11f, 1.f };
-    style.Colors[ImGuiCol_Header]    = { 0.22f, 0.40f, 0.65f, 0.6f };
-
+    auto& st = ImGui::GetStyle();
+    st.WindowRounding = 4.f; st.FrameRounding = 3.f; st.TabRounding = 3.f;
+    st.Colors[ImGuiCol_WindowBg]  = {0.12f,0.12f,0.13f,1.f};
+    st.Colors[ImGuiCol_MenuBarBg] = {0.10f,0.10f,0.11f,1.f};
+    st.Colors[ImGuiCol_Header]    = {0.22f,0.40f,0.65f,0.6f};
     ImGui_ImplSDL3_InitForOpenGL(window_.sdlWindow(), window_.glContext());
     ImGui_ImplOpenGL3_Init("#version 460");
 
-    // ── Renderer ──────────────────────────────────────────────────────────────
-    if (!renderer_.init()) {
-        std::cerr << "[error] Renderer init failed\n";
-        return false;
-    }
-    if (!gridRenderer_.init()) {
-        std::cerr << "[warn] Grid renderer init failed — grid disabled\n";
-    }
-
-    // ── Initial viewport FBO ──────────────────────────────────────────────────
+    if (!renderer_.init()) { std::cerr << "[error] Renderer init\n"; return false; }
+    gridRenderer_.init();
     viewportFbo_ = gfx::Framebuffer::create(1024, 600);
-
-    // ── Default scene ─────────────────────────────────────────────────────────
     buildDefaultScene();
-
     return true;
 }
 
 // ─── Default scene ────────────────────────────────────────────────────────────
 
 void EditorApp::buildDefaultScene() {
-    scene_ = {};
-    scene_.name = "untitled";
-    selection_.clear();
-    commands_.clear();
-    gpuData_.clear();
+    scene_ = {}; scene_.name = "untitled";
+    selection_.clear(); faceSelection_.clear();
+    commands_.clear(); gpuData_.clear();
 
-    // Floor
+    auto add = [&](scene::BrushEntity e) {
+        auto id = scene_.addEntity(std::move(e)); rebuildEntityMesh(id); };
+
+    scene::BrushEntity floor;
+    floor.name = "floor"; floor.brushes = { geo::makeBox({-256,-16,-256},{256,0,256}) };
+    add(std::move(floor));
+
     {
-        scene::BrushEntity e;
-        e.name    = "floor";
-        e.brushes = { geo::makeBox({-256, -16, -256}, {256, 0, 256}) };
-        auto id = scene_.addEntity(std::move(e));
-        rebuildEntityMesh(id);
+        auto w = geo::makeBox({-256,0,240},{256,256,256});
+        auto c = geo::makeBox({-32,0,239},{32,192,257});
+        scene::BrushEntity nw; nw.name = "north_wall"; nw.brushes = geo::csgSubtract(w, c);
+        add(std::move(nw));
     }
-    // North wall + doorway CSG
-    {
-        auto wall   = geo::makeBox({-256, 0, 240}, {256, 256, 256});
-        auto cutter = geo::makeBox({-32, 0, 239}, {32, 192, 257});
-        scene::BrushEntity e;
-        e.name    = "north_wall";
-        e.brushes = geo::csgSubtract(wall, cutter);
-        auto id = scene_.addEntity(std::move(e));
-        rebuildEntityMesh(id);
-    }
-    // South wall
-    {
-        scene::BrushEntity e;
-        e.name    = "south_wall";
-        e.brushes = { geo::makeBox({-256, 0, -256}, {256, 256, -240}) };
-        auto id = scene_.addEntity(std::move(e));
-        rebuildEntityMesh(id);
-    }
-    // Pillar
-    {
-        scene::BrushEntity e;
-        e.name    = "pillar";
-        e.brushes = { geo::makePrism({64, 0, 64}, 24.0, 256.0, 8) };
-        auto id = scene_.addEntity(std::move(e));
-        rebuildEntityMesh(id);
-    }
-    // Player spawn
-    {
-        scene::PointEntity pe;
-        pe.name      = "player_start";
-        pe.classname = "info_player_start";
-        pe.transform = scene::Transform::fromTranslation({0, 32, 0});
-        scene_.addEntity(std::move(pe));
-    }
+    { scene::BrushEntity e; e.name="south_wall"; e.brushes={geo::makeBox({-256,0,-256},{256,256,-240})}; add(std::move(e)); }
+    { scene::BrushEntity e; e.name="east_wall";  e.brushes={geo::makeBox({240,0,-256},{256,256,256})};   add(std::move(e)); }
+    { scene::BrushEntity e; e.name="west_wall";  e.brushes={geo::makeBox({-256,0,-256},{-240,256,256})}; add(std::move(e)); }
+    { scene::BrushEntity e; e.name="ceiling";    e.brushes={geo::makeBox({-256,256,-256},{256,272,256})}; add(std::move(e)); }
+    { scene::BrushEntity e; e.name="pillar";     e.brushes={geo::makePrism({64,0,64},24.0,256.0,8)};    add(std::move(e)); }
+
+    { scene::PointEntity pe; pe.name="player_start"; pe.classname="info_player_start";
+      pe.transform=scene::Transform::fromTranslation({0,32,0}); scene_.addEntity(std::move(pe)); }
 
     camera_.frameAABB(scene_.worldBounds());
     setStatus("Default scene loaded");
@@ -150,22 +105,19 @@ void EditorApp::buildDefaultScene() {
 // ─── Mesh management ─────────────────────────────────────────────────────────
 
 void EditorApp::rebuildEntityMesh(scene::EntityId id) {
-    const auto* e = scene_.getEntity(id);
+    auto* e = scene_.getEntity(id);
     if (!e) { gpuData_.erase(id); return; }
-
-    const auto* be = std::get_if<scene::BrushEntity>(e);
+    auto* be = std::get_if<scene::BrushEntity>(e);
     if (!be) { gpuData_.erase(id); return; }
-
-    EntityGPUData data;
-    data.model = glm::mat4(be->transform.matrix());
-    data.mesh  = gfx::GPUEntityMesh::upload(build::buildEntityMesh(*be, /*applyTransform=*/false));
-    gpuData_[id] = std::move(data);
+    EntityGPUData d;
+    d.model = glm::mat4(be->transform.matrix());
+    d.mesh  = gfx::GPUEntityMesh::upload(build::buildEntityMesh(*be, false));
+    gpuData_[id] = std::move(d);
 }
 
 void EditorApp::rebuildAllMeshes() {
     gpuData_.clear();
-    for (const auto& [id, entity] : scene_.entities)
-        rebuildEntityMesh(id);
+    for (const auto& [id, _] : scene_.entities) rebuildEntityMesh(id);
 }
 
 // ─── Run loop ─────────────────────────────────────────────────────────────────
@@ -174,96 +126,66 @@ void EditorApp::run() {
     while (!window_.shouldClose()) {
         window_.pollEvents();
         statusTimer_ -= window_.deltaTime();
-
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
         ImGuizmo::BeginFrame();
-
         drawFrame();
-
         ImGui::Render();
-
-        // Clear main window (panels cover it)
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, window_.width(), window_.height());
         glClearColor(0.08f, 0.08f, 0.10f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
-
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         window_.swapBuffers();
     }
 }
 
-// ─── Main frame ───────────────────────────────────────────────────────────────
+// ─── Frame ────────────────────────────────────────────────────────────────────
 
 void EditorApp::drawFrame() {
-    // ── Full-window dockspace ─────────────────────────────────────────────────
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
     ImGui::SetNextWindowViewport(vp->ID);
-
-    ImGuiWindowFlags hostFlags =
-        ImGuiWindowFlags_NoTitleBar    | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoResize      | ImGuiWindowFlags_NoMove     |
-        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
-        ImGuiWindowFlags_MenuBar;
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.f, 0.f});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.f,0.f});
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
-    ImGui::Begin("##forge_host", nullptr, hostFlags);
+    ImGui::Begin("##host", nullptr,
+        ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoCollapse|
+        ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|
+        ImGuiWindowFlags_NoBringToFrontOnFocus|ImGuiWindowFlags_NoNavFocus|
+        ImGuiWindowFlags_MenuBar);
     ImGui::PopStyleVar(2);
-
-    // Menu bar inside host window
     drawMainMenuBar();
-
-    // Dockspace
-    const ImGuiID dockId = ImGui::GetID("ForgeDockspace");
-    ImGui::DockSpace(dockId, {0.f, 0.f}, ImGuiDockNodeFlags_None);
-
-    if (!layoutReady_) {
-        setupDefaultDockLayout(dockId);
-    }
-
+    const ImGuiID dock = ImGui::GetID("ForgeDock");
+    ImGui::DockSpace(dock, {0.f,0.f});
+    if (!layoutReady_) setupDefaultDockLayout(dock);
     ImGui::End();
 
-    // ── Tool bar (above viewport — rendered as separate panel) ────────────────
     drawToolbar();
-
-    // ── Panels ────────────────────────────────────────────────────────────────
     drawViewport();
     drawSceneTree();
     drawProperties();
     drawStatusBar();
 }
 
-// ─── Default dock layout ──────────────────────────────────────────────────────
+// ─── Dock layout ─────────────────────────────────────────────────────────────
 
-void EditorApp::setupDefaultDockLayout(ImGuiID dockId) {
-    ImGui::DockBuilderRemoveNode(dockId);
-    ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
-    ImGui::DockBuilderSetNodeSize(dockId, ImGui::GetMainViewport()->WorkSize);
-
-    // Split: left (viewport+toolbar) | right (panels)
-    ImGuiID rightId, leftId;
-    ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Right, 0.24f, &rightId, &leftId);
-
-    // Split right: top (scene tree) | bottom (properties)
-    ImGuiID rightTopId, rightBotId;
-    ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Down, 0.55f, &rightBotId, &rightTopId);
-
-    // Split left: top (toolbar) | bottom (viewport)
-    ImGuiID toolbarId, viewportId;
-    ImGui::DockBuilderSplitNode(leftId, ImGuiDir_Up, 0.045f, &toolbarId, &viewportId);
-
-    ImGui::DockBuilderDockWindow("Viewport",    viewportId);
-    ImGui::DockBuilderDockWindow("##toolbar",   toolbarId);
-    ImGui::DockBuilderDockWindow("Scene Tree",  rightTopId);
-    ImGui::DockBuilderDockWindow("Properties",  rightBotId);
-    ImGui::DockBuilderDockWindow("##status",    dockId);
-
-    ImGui::DockBuilderFinish(dockId);
+void EditorApp::setupDefaultDockLayout(ImGuiID dock) {
+    ImGui::DockBuilderRemoveNode(dock);
+    ImGui::DockBuilderAddNode(dock, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dock, ImGui::GetMainViewport()->WorkSize);
+    ImGuiID right, left;
+    ImGui::DockBuilderSplitNode(dock,  ImGuiDir_Right, 0.24f, &right, &left);
+    ImGuiID rtop, rbot;
+    ImGui::DockBuilderSplitNode(right, ImGuiDir_Down,  0.55f, &rbot,  &rtop);
+    ImGuiID tbar, vp;
+    ImGui::DockBuilderSplitNode(left,  ImGuiDir_Up,    0.045f, &tbar, &vp);
+    ImGui::DockBuilderDockWindow("Viewport",   vp);
+    ImGui::DockBuilderDockWindow("##toolbar",  tbar);
+    ImGui::DockBuilderDockWindow("Scene Tree", rtop);
+    ImGui::DockBuilderDockWindow("Properties", rbot);
+    ImGui::DockBuilderFinish(dock);
     layoutReady_ = true;
 }
 
@@ -272,185 +194,166 @@ void EditorApp::setupDefaultDockLayout(ImGuiID dockId) {
 void EditorApp::drawMainMenuBar() {
     if (!ImGui::BeginMenuBar()) return;
 
-    // ── File ──────────────────────────────────────────────────────────────────
     if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("New Scene", "Ctrl+N")) {
-            newScene();
-        }
+        if (ImGui::MenuItem("New Scene","Ctrl+N")) newScene();
         ImGui::Separator();
         if (ImGui::BeginMenu("Export")) {
-            if (ImGui::MenuItem("Export OBJ..."))  exportOBJ();
-            if (ImGui::MenuItem("Export MAP (Valve 220)...")) exportMAP();
+            if (ImGui::MenuItem("OBJ..."))        exportOBJ();
+            if (ImGui::MenuItem("MAP (Valve 220)...")) exportMAP();
             ImGui::EndMenu();
         }
-        ImGui::Separator();
-        if (ImGui::MenuItem("Quit", "Alt+F4")) {
-            // handled by window close
-        }
         ImGui::EndMenu();
     }
 
-    // ── Edit ──────────────────────────────────────────────────────────────────
     if (ImGui::BeginMenu("Edit")) {
-        const bool canUndo = commands_.canUndo();
-        const bool canRedo = commands_.canRedo();
-
-        if (ImGui::MenuItem("Undo", "Ctrl+Z", false, canUndo)) {
-            commands_.undo(scene_);
-            rebuildAllMeshes();
+        if (ImGui::MenuItem("Undo","Ctrl+Z",false,commands_.canUndo())) {
+            commands_.undo(scene_); rebuildAllMeshes();
         }
-        if (ImGui::MenuItem("Redo", "Ctrl+Y", false, canRedo)) {
-            commands_.redo(scene_);
-            rebuildAllMeshes();
+        if (ImGui::MenuItem("Redo","Ctrl+Y",false,commands_.canRedo())) {
+            commands_.redo(scene_); rebuildAllMeshes();
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Delete Selected", "Del", false, selection_.hasEntity())) {
-            auto cmd = std::make_unique<DeleteEntityCommand>(selection_.entityId);
-            commands_.push(std::move(cmd), scene_);
-            gpuData_.erase(selection_.entityId);
-            selection_.clear();
+        if (ImGui::MenuItem("Delete Selected","Del",false,selection_.hasEntity())) {
+            commands_.push(std::make_unique<DeleteEntityCommand>(selection_.entityId), scene_);
+            gpuData_.erase(selection_.entityId); selection_.clear(); faceSelection_.clear();
         }
+        ImGui::Separator();
+        if (ImGui::MenuItem("CSG Subtract (selection=cutter)",nullptr,false,selection_.hasEntity()))
+            applyCSGSubtract();
         ImGui::EndMenu();
     }
 
-    // ── Add ───────────────────────────────────────────────────────────────────
-    if (ImGui::BeginMenu("Add")) {
-        drawAddPrimitivesMenu();
-        ImGui::EndMenu();
-    }
+    if (ImGui::BeginMenu("Add")) { drawAddPrimitivesMenu(); ImGui::EndMenu(); }
 
-    // ── View ──────────────────────────────────────────────────────────────────
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Grid",      nullptr, &showGrid_);
         ImGui::MenuItem("Wireframe", "F1",    &wireframe_);
         ImGui::Separator();
-        if (ImGui::MenuItem("Frame All", "F")) {
-            camera_.frameAABB(scene_.worldBounds());
+        if (ImGui::MenuItem("Frame All","F")) camera_.frameAABB(scene_.worldBounds());
+        if (ImGui::MenuItem("Frame Selected",nullptr,false,selection_.hasEntity())) {
+            if (auto* e = scene_.getEntity(selection_.entityId))
+                if (auto* be = std::get_if<scene::BrushEntity>(e))
+                    camera_.frameAABB(be->worldBounds());
         }
         ImGui::EndMenu();
     }
 
     // FPS right-aligned
-    const float fps = window_.fps();
-    const std::string fpsStr = std::format("{:.0f} fps", fps);
-    ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - ImGui::CalcTextSize(fpsStr.c_str()).x - 8.f);
-    ImGui::TextDisabled("%s", fpsStr.c_str());
-
+    const std::string fps = std::format("{:.0f} fps", window_.fps());
+    ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x
+                         - ImGui::CalcTextSize(fps.c_str()).x - 8.f);
+    ImGui::TextDisabled("%s", fps.c_str());
     ImGui::EndMenuBar();
 }
 
 // ─── Add primitives submenu ───────────────────────────────────────────────────
 
 void EditorApp::drawAddPrimitivesMenu() {
-    static int prismSides   = 6;
-    static int pyramidSides = 4;
+    static int pSides = 6, ySides = 4;
 
-    auto addBrush = [&](std::string name, geo::Brush brush) {
+    auto add = [&](std::string name, geo::Brush b) {
         scene::BrushEntity e;
         e.name    = std::move(name);
-        e.brushes = { std::move(brush) };
-        // Place at camera target height
-        e.transform = scene::Transform::fromTranslation(
-            glm::dvec3(camera_.target) + glm::dvec3(0, 0, 0));
-        auto id = scene_.addEntity(e);          // preview
-        scene_.removeEntity(id);                // undo preview
-        auto cmd = std::make_unique<AddBrushEntityCommand>(std::move(e));
-        const auto addedId = scene_.addEntity(cmd->entity);
-        cmd->addedId = addedId;
-        rebuildEntityMesh(addedId);
-        selection_.selectEntity(addedId);
-        setStatus(std::format("Added '{}'", cmd->entity.name));
-        // Note: pushes but entity already added above — simplified for demo
-        // In production: push cmd, it re-executes addEntity
+        e.brushes = { std::move(b) };
+        e.transform = scene::Transform::fromTranslation(glm::dvec3(camera_.target));
+        auto id = scene_.addEntity(std::move(e));
+        rebuildEntityMesh(id);
+        selection_.selectEntity(id);
+        faceSelection_.clear();
+        setStatus(std::format("Added '{}'", scene::entityName(*scene_.getEntity(id))));
     };
 
-    if (ImGui::MenuItem("Box (64³)")) {
-        addBrush("box", geo::makeBox({-32, 0, -32}, {32, 64, 32}));
-    }
-    if (ImGui::MenuItem("Wedge (64³)")) {
-        addBrush("wedge", geo::makeWedge({-32, 0, -32}, {32, 64, 32}));
-    }
+    if (ImGui::MenuItem("Box (64³)"))
+        add("box",    geo::makeBox({-32,0,-32},{32,64,32}));
+    if (ImGui::MenuItem("Wedge (64³)"))
+        add("wedge",  geo::makeWedge({-32,0,-32},{32,64,32}));
     ImGui::Separator();
-    ImGui::SetNextItemWidth(80.f);
-    ImGui::InputInt("Sides##prism", &prismSides);
-    prismSides = std::clamp(prismSides, 3, 32);
-    if (ImGui::MenuItem(std::format("Prism ({}-sided)", prismSides).c_str())) {
-        addBrush(std::format("{}_prism", prismSides),
-                 geo::makePrism({0, 0, 0}, 32.0, 64.0, prismSides));
-    }
-    ImGui::SetNextItemWidth(80.f);
-    ImGui::InputInt("Sides##pyramid", &pyramidSides);
-    pyramidSides = std::clamp(pyramidSides, 3, 32);
-    if (ImGui::MenuItem(std::format("Pyramid ({}-sided)", pyramidSides).c_str())) {
-        addBrush(std::format("{}_pyramid", pyramidSides),
-                 geo::makePyramid({0, 0, 0}, 32.0, 64.0, pyramidSides));
-    }
+    ImGui::SetNextItemWidth(70); ImGui::InputInt("##ps",&pSides); pSides=std::clamp(pSides,3,32);
+    ImGui::SameLine();
+    if (ImGui::MenuItem(std::format("{}-Prism",pSides).c_str()))
+        add(std::format("{}_prism",pSides), geo::makePrism({0,0,0},32.,64.,pSides));
+    ImGui::SetNextItemWidth(70); ImGui::InputInt("##ys",&ySides); ySides=std::clamp(ySides,3,32);
+    ImGui::SameLine();
+    if (ImGui::MenuItem(std::format("{}-Pyramid",ySides).c_str()))
+        add(std::format("{}_pyramid",ySides), geo::makePyramid({0,0,0},32.,64.,ySides));
 }
 
 // ─── Toolbar ──────────────────────────────────────────────────────────────────
 
 void EditorApp::drawToolbar() {
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {4.f, 4.f});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {4.f,4.f});
     ImGui::Begin("##toolbar", nullptr,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
+        ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
 
-    auto toolButton = [&](const char* label, ActiveTool tool, const char* tooltip) {
-        const bool active = activeTool_ == tool;
-        if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-        if (ImGui::Button(label, {36.f, 22.f})) activeTool_ = tool;
-        if (active) ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+    auto btn = [&](const char* lbl, ActiveTool t, const char* tip) {
+        const bool on = activeTool_ == t;
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+        if (ImGui::Button(lbl,{38.f,22.f})) {
+            activeTool_ = t;
+            if (t != ActiveTool::FaceSelect && t != ActiveTool::FaceMove && t != ActiveTool::Paint)
+                faceSelection_.clear();
+        }
+        if (on) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tip);
         ImGui::SameLine();
     };
 
-    toolButton("SEL",  ActiveTool::Select, "Select (Q)");
-    toolButton("MOV",  ActiveTool::Move,   "Move (W)");
-    toolButton("ROT",  ActiveTool::Rotate, "Rotate (E)");
-    toolButton("SCL",  ActiveTool::Scale,  "Scale (R)");
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
-    ImGui::Checkbox("Grid", &showGrid_); ImGui::SameLine();
-    ImGui::Checkbox("Wire", &wireframe_); ImGui::SameLine();
+    // Entity tools
+    btn("SEL",  ActiveTool::Select,     "Select entity (Q)");
+    btn("MOV",  ActiveTool::Move,       "Move entity (W)");
+    btn("ROT",  ActiveTool::Rotate,     "Rotate entity (E)");
+    btn("SCL",  ActiveTool::Scale,      "Scale entity (R)");
 
-    // Undo / Redo buttons
+    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+
+    // Face / geometry tools
+    btn("FSEL", ActiveTool::FaceSelect, "Select face (T)");
+    btn("FMOV", ActiveTool::FaceMove,   "Move face along normal (Y)");
+    btn("CLIP", ActiveTool::Clip,       "Clip brush with plane (C)");
+    btn("PAINT",ActiveTool::Paint,      "Paint material (P)");
+
+    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+    ImGui::Checkbox("Grid",&showGrid_); ImGui::SameLine();
+    ImGui::Checkbox("Wire",&wireframe_); ImGui::SameLine();
+
     ImGui::BeginDisabled(!commands_.canUndo());
     if (ImGui::Button("Undo")) { commands_.undo(scene_); rebuildAllMeshes(); }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
+    ImGui::EndDisabled(); ImGui::SameLine();
     ImGui::BeginDisabled(!commands_.canRedo());
     if (ImGui::Button("Redo")) { commands_.redo(scene_); rebuildAllMeshes(); }
     ImGui::EndDisabled();
 
     // Keyboard shortcuts
-    const auto& keys = window_.input().keys;
-    if (keys.f1) wireframe_ = !wireframe_;
-    if (keys.q)  activeTool_ = ActiveTool::Select;
-    if (keys.w && !ImGui::GetIO().WantCaptureKeyboard) activeTool_ = ActiveTool::Move;
-    if (keys.e && !ImGui::GetIO().WantCaptureKeyboard) activeTool_ = ActiveTool::Rotate;
-    if (keys.r && !ImGui::GetIO().WantCaptureKeyboard) activeTool_ = ActiveTool::Scale;
-
+    const auto& k = window_.input().keys;
+    if (!ImGui::GetIO().WantCaptureKeyboard) {
+        if (k.f1) wireframe_ = !wireframe_;
+        if (k.q)  activeTool_ = ActiveTool::Select;
+        if (k.w)  activeTool_ = ActiveTool::Move;
+        if (k.e)  activeTool_ = ActiveTool::Rotate;
+        if (k.r)  activeTool_ = ActiveTool::Scale;
+    }
     ImGui::End();
 }
 
 // ─── Viewport ─────────────────────────────────────────────────────────────────
 
 void EditorApp::drawViewport() {
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.f, 0.f});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.f,0.f});
     ImGui::Begin("Viewport");
     ImGui::PopStyleVar();
 
-    ImVec2 size = ImGui::GetContentRegionAvail();
-    if (size.x < 8.f || size.y < 8.f) { ImGui::End(); return; }
+    const ImVec2 sz = ImGui::GetContentRegionAvail();
+    if (sz.x < 8.f || sz.y < 8.f) { ImGui::End(); return; }
 
-    viewportFbo_.resize(static_cast<int>(size.x), static_cast<int>(size.y));
+    viewportFbo_.resize((int)sz.x, (int)sz.y);
 
     // ── Render scene to FBO ───────────────────────────────────────────────────
     viewportFbo_.bind();
-    glClearColor(0.10f, 0.10f, 0.12f, 1.f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glClearColor(0.10f,0.10f,0.12f,1.f);
+    glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
-    const float aspect = size.x / size.y;
-
+    const float aspect = sz.x / sz.y;
     gfx::RenderFrame frame;
     frame.view      = camera_.viewMatrix();
     frame.proj      = camera_.projMatrix(aspect);
@@ -458,99 +361,221 @@ void EditorApp::drawViewport() {
     frame.wireframe = wireframe_;
 
     renderer_.beginFrame(frame);
-
     for (const auto& [id, data] : gpuData_) {
-        const bool isSelected = (selection_.entityId == id);
+        const bool sel = (selection_.entityId == id);
         for (const auto& sub : data.mesh.submeshes) {
             glm::vec3 col = materialColour(sub.materialId());
-            // Highlight selected entity
-            if (isSelected) col = glm::mix(col, glm::vec3(0.3f, 0.65f, 1.f), 0.45f);
+            if (sel) col = glm::mix(col, glm::vec3(0.3f,0.65f,1.f), 0.4f);
             renderer_.submit({ &sub, data.model, col });
         }
     }
-
     renderer_.endFrame();
 
-    // Grid (rendered after opaque pass with blending)
-    if (showGrid_ && gridRenderer_.valid()) {
+    if (showGrid_ && gridRenderer_.valid())
         gridRenderer_.draw(frame.view, frame.proj, camera_.nearZ, camera_.farZ);
-    }
 
     viewportFbo_.unbind();
     glViewport(0, 0, window_.width(), window_.height());
 
-    // ── Display FBO as ImGui image ────────────────────────────────────────────
-    // UV {0,1}→{1,0} flips Y (OpenGL vs ImGui coordinate mismatch)
-    const ImVec2 viewportPos = ImGui::GetCursorScreenPos();
+    // ── Display FBO ───────────────────────────────────────────────────────────
+    const ImVec2 vpPos = ImGui::GetCursorScreenPos();
     ImGui::Image(
         reinterpret_cast<ImTextureID>(static_cast<intptr_t>(viewportFbo_.colorTexture)),
-        size, {0.f, 1.f}, {1.f, 0.f});
+        sz, {0.f,1.f}, {1.f,0.f});
 
-    // ── Viewport mouse interaction ────────────────────────────────────────────
-    if (ImGui::IsItemHovered()) {
-        handleViewportMouse(viewportPos, size);
-    }
+    // ── ImGui overlays drawn on top of the image ──────────────────────────────
+    const glm::mat4 vp = frame.proj * frame.view;
+    if (faceSelection_.valid())
+        drawFaceOverlay(vpPos, sz, vp);
+    if (activeTool_ == ActiveTool::Clip && selection_.hasEntity())
+        drawClipPreview(vpPos, sz, vp);
 
-    // ── ImGuizmo gizmo overlay ────────────────────────────────────────────────
-    drawGizmo(viewportPos, size);
+    // ── Mouse input ───────────────────────────────────────────────────────────
+    if (ImGui::IsItemHovered())
+        handleViewportMouse(vpPos, sz);
+
+    // ── Gizmo ────────────────────────────────────────────────────────────────
+    drawGizmo(vpPos, sz);
 
     ImGui::End();
 }
 
-void EditorApp::handleViewportMouse(ImVec2 viewportPos, ImVec2 viewportSize) {
-    const auto& mouse = window_.input().mouse;
-    const bool wantGizmo = ImGuizmo::IsUsing() || ImGuizmo::IsOver();
+// ─── Face overlay ─────────────────────────────────────────────────────────────
 
-    // ── Camera orbit / pan / zoom ─────────────────────────────────────────────
-    if (!wantGizmo) {
-        if (mouse.left && activeTool_ == ActiveTool::Select)
-            camera_.orbit(mouse.dx, mouse.dy);
-        if (mouse.right || mouse.middle)
-            camera_.pan(mouse.dx, mouse.dy);
+void EditorApp::drawFaceOverlay(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
+    auto* entity = scene_.getEntity(faceSelection_.entityId);
+    if (!entity) return;
+    auto* be = std::get_if<scene::BrushEntity>(entity);
+    if (!be || faceSelection_.brushIdx >= be->brushes.size()) return;
+
+    const auto& brush = be->brushes[faceSelection_.brushIdx];
+    if (faceSelection_.faceIdx >= brush.faces.size()) return;
+
+    const auto& poly = brush.facePolygon(faceSelection_.faceIdx);
+    if (poly.size() < 3) return;
+
+    auto* dl = ImGui::GetWindowDrawList();
+
+    // Build screen-space polygon
+    std::vector<ImVec2> pts;
+    pts.reserve(poly.size());
+    for (const auto& lp : poly) {
+        const glm::vec3 wp = glm::vec3(be->transform.transformPoint(lp));
+        pts.push_back(w2s(wp, vp, pos, sz));
     }
-    if (mouse.scroll != 0.f) camera_.zoom(mouse.scroll);
 
-    // ── Click to select ───────────────────────────────────────────────────────
-    const bool leftClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-    if (leftClicked && !wantGizmo && activeTool_ == ActiveTool::Select) {
-        const ImVec2 mouseInVP = {
-            ImGui::GetMousePos().x - viewportPos.x,
-            ImGui::GetMousePos().y - viewportPos.y
-        };
+    // Filled (semi-transparent highlight)
+    dl->AddConvexPolyFilled(pts.data(), (int)pts.size(),
+                             IM_COL32(80,180,255,45));
+
+    // Outline
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        dl->AddLine(pts[i], pts[(i+1) % pts.size()],
+                    IM_COL32(100,210,255,230), 2.f);
+    }
+
+    // Face normal arrow (centre → centre + normal*24)
+    const glm::vec3 centre = [&] {
+        glm::dvec3 c{};
+        for (const auto& lp : poly) c += lp;
+        return glm::vec3(be->transform.transformPoint(c / double(poly.size())));
+    }();
+    const glm::vec3 tip = centre
+        + glm::vec3(be->transform.transformNormal(brush.faces[faceSelection_.faceIdx].plane.normal))
+        * 24.f;
+
+    dl->AddLine(w2s(centre, vp, pos, sz),
+                w2s(tip,    vp, pos, sz),
+                IM_COL32(255,220,50,200), 1.5f);
+
+    // Label
+    const auto labelPos = w2s(tip, vp, pos, sz);
+    if (labelPos.x > -1e5f)
+        dl->AddText(labelPos, IM_COL32(255,220,50,200),
+                    brush.faces[faceSelection_.faceIdx].materialId.c_str());
+}
+
+// ─── Clip preview ─────────────────────────────────────────────────────────────
+
+void EditorApp::drawClipPreview(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
+    const float p = clipState_.position;
+    const float H = 300.f; // half-extent
+
+    std::array<glm::vec3, 4> corners;
+    switch (clipState_.axis) {
+    case ClipAxis::X:
+        corners = {{ {p,-H,-H},{p, H,-H},{p, H, H},{p,-H, H} }}; break;
+    case ClipAxis::Y:
+        corners = {{ {-H,p,-H},{ H,p,-H},{ H,p, H},{-H,p, H} }}; break;
+    case ClipAxis::Z:
+        corners = {{ {-H,-H,p},{ H,-H,p},{ H, H,p},{-H, H,p} }}; break;
+    }
+
+    std::array<ImVec2, 4> pts;
+    for (int i = 0; i < 4; ++i) pts[i] = w2s(corners[i], vp, pos, sz);
+
+    auto* dl = ImGui::GetWindowDrawList();
+    dl->AddConvexPolyFilled(pts.data(), 4, IM_COL32(255,160,50,35));
+    for (int i = 0; i < 4; ++i)
+        dl->AddLine(pts[i], pts[(i+1)%4], IM_COL32(255,160,50,200), 1.5f);
+}
+
+// ─── Viewport mouse ──────────────────────────────────────────────────────────
+
+void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
+    const auto& m = window_.input().mouse;
+    const bool gizmoOver = ImGuizmo::IsUsing() || ImGuizmo::IsOver();
+    const float aspect   = vpSz.x / vpSz.y;
+
+    // Camera orbit / pan / zoom
+    if (!gizmoOver) {
+        const bool entityTool =
+            activeTool_ == ActiveTool::Select ||
+            activeTool_ == ActiveTool::FaceSelect ||
+            activeTool_ == ActiveTool::Clip;
+        if (m.left && entityTool)   camera_.orbit(m.dx, m.dy);
+        if (m.right || m.middle)    camera_.pan  (m.dx, m.dy);
+    }
+    if (m.scroll != 0.f) camera_.zoom(m.scroll);
+
+    // Click handling
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !gizmoOver) {
+        const ImVec2 rel = { ImGui::GetMousePos().x - vpPos.x,
+                             ImGui::GetMousePos().y - vpPos.y };
         const glm::vec2 ndc = {
-             (mouseInVP.x / viewportSize.x) * 2.f - 1.f,
-            -((mouseInVP.y / viewportSize.y) * 2.f - 1.f)
+             (rel.x / vpSz.x) * 2.f - 1.f,
+            -((rel.y / vpSz.y) * 2.f - 1.f)
         };
-        const float aspect = viewportSize.x / viewportSize.y;
-        const auto picked  = pickEntity(ndc, scene_, camera_, aspect);
 
-        if (picked != scene::kInvalidEntityId)
-            selection_.selectEntity(picked);
-        else
-            selection_.clear();
+        switch (activeTool_) {
+        case ActiveTool::Select: {
+            const auto id = pickEntity(ndc, scene_, camera_, aspect);
+            if (id != scene::kInvalidEntityId) { selection_.selectEntity(id); faceSelection_.clear(); }
+            else                               { selection_.clear(); faceSelection_.clear(); }
+            break;
+        }
+        case ActiveTool::FaceSelect:
+        case ActiveTool::FaceMove:
+        case ActiveTool::Paint: {
+            const auto hit = pickFace(ndc, scene_, camera_, aspect);
+            if (hit) {
+                faceSelection_.select(hit->entityId, hit->brushIdx, hit->faceIdx);
+                selection_.selectEntity(hit->entityId);
+                // In paint mode, immediately set the paint material
+                if (activeTool_ == ActiveTool::Paint) {
+                    auto* e = scene_.getEntity(hit->entityId);
+                    auto* be = std::get_if<scene::BrushEntity>(e);
+                    if (be) {
+                        const std::string& old = be->brushes[hit->brushIdx].faces[hit->faceIdx].materialId;
+                        if (old != paintMaterial_) {
+                            commands_.push(std::make_unique<SetFaceMaterialCommand>(
+                                hit->entityId, hit->brushIdx, hit->faceIdx,
+                                old, paintMaterial_), scene_);
+                            rebuildEntityMesh(hit->entityId);
+                            setStatus(std::format("Painted '{}' → {}", old, paintMaterial_));
+                        }
+                    }
+                }
+            } else {
+                faceSelection_.clear();
+            }
+            break;
+        }
+        default: {
+            // Move/Rotate/Scale: entity selection only
+            const auto id = pickEntity(ndc, scene_, camera_, aspect);
+            if (id != scene::kInvalidEntityId) selection_.selectEntity(id);
+            else                               selection_.clear();
+            faceSelection_.clear();
+            break;
+        }
+        }
     }
 }
 
-void EditorApp::drawGizmo(ImVec2 viewportPos, ImVec2 viewportSize) {
-    if (!selection_.hasEntity()) return;
-    if (activeTool_ == ActiveTool::Select) return;
+// ─── Gizmo ───────────────────────────────────────────────────────────────────
 
-    const auto* entity = scene_.getEntity(selection_.entityId);
+void EditorApp::drawGizmo(ImVec2 vpPos, ImVec2 vpSz) {
+    if (!selection_.hasEntity()) return;
+    if (activeTool_ == ActiveTool::Select ||
+        activeTool_ == ActiveTool::FaceSelect ||
+        activeTool_ == ActiveTool::FaceMove ||
+        activeTool_ == ActiveTool::Clip ||
+        activeTool_ == ActiveTool::Paint) return;
+
+    auto* entity = scene_.getEntity(selection_.entityId);
     if (!entity) return;
 
-    const float aspect = viewportSize.x / viewportSize.y;
-
+    const float aspect = vpSz.x / vpSz.y;
     glm::mat4 view = camera_.viewMatrix();
     glm::mat4 proj = camera_.projMatrix(aspect);
-
-    // Get current model matrix
-    auto& data = gpuData_[selection_.entityId];
-    glm::mat4 model = data.model;
+    glm::mat4 model = gpuData_.count(selection_.entityId)
+                    ? gpuData_[selection_.entityId].model
+                    : glm::mat4(1.f);
 
     ImGuizmo::SetOrthographic(false);
     ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
-    ImGuizmo::SetRect(viewportPos.x, viewportPos.y,
-                      viewportSize.x, viewportSize.y);
+    ImGuizmo::SetRect(vpPos.x, vpPos.y, vpSz.x, vpSz.y);
 
     ImGuizmo::OPERATION op = ImGuizmo::TRANSLATE;
     if (activeTool_ == ActiveTool::Rotate) op = ImGuizmo::ROTATE;
@@ -558,47 +583,34 @@ void EditorApp::drawGizmo(ImVec2 viewportPos, ImVec2 viewportSize) {
 
     const bool wasUsing = gizmoDragging_;
     if (!gizmoDragging_ && ImGuizmo::IsUsing()) {
-        // Record start position for undo
         if (auto* be = std::get_if<scene::BrushEntity>(entity))
             gizmoDragStartPos_ = glm::vec3(be->transform.translation);
         gizmoDragging_ = true;
     }
 
-    ImGuizmo::Manipulate(
-        glm::value_ptr(view),
-        glm::value_ptr(proj),
-        op,
-        ImGuizmo::WORLD,
-        glm::value_ptr(model));
+    ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj),
+                         op, ImGuizmo::WORLD, glm::value_ptr(model));
 
     if (ImGuizmo::IsUsing()) {
-        // Update live transform (no undo entry yet — only on release)
-        data.model = model;
-        glm::vec3 newPos, scale, skew;
-        glm::vec4 persp;
-        glm::quat rot;
-        glm::decompose(model, scale, rot, newPos, skew, persp);
-
-        if (auto* be = std::get_if<scene::BrushEntity>(scene_.getEntity(selection_.entityId))) {
-            be->transform.translation = glm::dvec3(newPos);
+        if (auto it = gpuData_.find(selection_.entityId); it != gpuData_.end())
+            it->second.model = model;
+        glm::vec3 pos, scl, skw; glm::vec4 psp; glm::quat rot;
+        glm::decompose(model, scl, rot, pos, skw, psp);
+        if (auto* be = std::get_if<scene::BrushEntity>(entity)) {
+            be->transform.translation = glm::dvec3(pos);
             be->transform.rotation    = glm::dquat(rot);
         }
     } else if (wasUsing && !ImGuizmo::IsUsing()) {
-        // Released — push undo command
         gizmoDragging_ = false;
-        if (auto* be = std::get_if<scene::BrushEntity>(scene_.getEntity(selection_.entityId))) {
+        if (auto* be = std::get_if<scene::BrushEntity>(entity)) {
             const glm::vec3 newPos = glm::vec3(be->transform.translation);
             if (glm::length(newPos - gizmoDragStartPos_) > 1e-4f) {
-                // Push without re-executing (already applied live)
-                commands_.push(
-                    std::make_unique<MoveEntityCommand>(
-                        selection_.entityId,
-                        glm::dvec3(gizmoDragStartPos_),
-                        glm::dvec3(newPos)),
-                    scene_);
-                // Undo the execute() that push() called (we already moved it)
-                commands_.undo(scene_);
-                commands_.redo(scene_);
+                // Re-push via undo/redo to record correctly
+                commands_.push(std::make_unique<MoveEntityCommand>(
+                    selection_.entityId,
+                    glm::dvec3(gizmoDragStartPos_),
+                    glm::dvec3(newPos)), scene_);
+                commands_.undo(scene_); commands_.redo(scene_);
             }
         }
     }
@@ -608,56 +620,44 @@ void EditorApp::drawGizmo(ImVec2 viewportPos, ImVec2 viewportSize) {
 
 void EditorApp::drawSceneTree() {
     ImGui::Begin("Scene Tree");
-
-    // Scene name header
-    ImGui::TextColored({0.6f, 0.8f, 1.f, 1.f}, "Scene: %s", scene_.name.c_str());
-    const auto stats = scene_.stats();
-    ImGui::TextDisabled("%zu entities  %zu brushes  %zu faces",
-        scene_.entityCount(), stats.totalBrushCount, stats.totalFaceCount);
+    ImGui::TextColored({0.6f,0.8f,1.f,1.f}, "Scene: %s", scene_.name.c_str());
+    const auto st = scene_.stats();
+    ImGui::TextDisabled("%zu entities  %zu brushes",
+        scene_.entityCount(), st.totalBrushCount);
     ImGui::Separator();
 
-    // Entity list
     for (const auto& [id, entity] : scene_.entities) {
-        const std::string& name = scene::entityName(entity);
-        const bool selected     = (selection_.entityId == id);
-        const bool isBrush      = std::holds_alternative<scene::BrushEntity>(entity);
-        const bool isPoint      = std::holds_alternative<scene::PointEntity>(entity);
-
-        // Icon
-        const char* icon = isBrush ? "[B]" : isPoint ? "[P]" : "[M]";
-        ImGui::TextDisabled("%s", icon); ImGui::SameLine();
-
-        ImGuiTreeNodeFlags flags =
-            ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_SpanFullWidth;
-        if (selected) flags |= ImGuiTreeNodeFlags_Selected;
-
+        const bool sel  = (selection_.entityId == id);
+        const bool isBE = std::holds_alternative<scene::BrushEntity>(entity);
+        const bool isPE = std::holds_alternative<scene::PointEntity>(entity);
+        const char* ico = isBE ? "[B]" : isPE ? "[P]" : "[M]";
+        ImGui::TextDisabled("%s",ico); ImGui::SameLine();
+        ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_Leaf|ImGuiTreeNodeFlags_SpanFullWidth;
+        if (sel) fl |= ImGuiTreeNodeFlags_Selected;
         const bool open = ImGui::TreeNodeEx(
-            std::format("{}##{}", name, id).c_str(), flags);
-
+            std::format("{}##{}", scene::entityName(entity), id).c_str(), fl);
         if (ImGui::IsItemClicked()) {
-            if (selected) selection_.clear();
-            else          selection_.selectEntity(id);
+            if (sel) { selection_.clear(); faceSelection_.clear(); }
+            else     { selection_.selectEntity(id); faceSelection_.clear(); }
         }
-
-        // Right-click context menu
         if (ImGui::BeginPopupContextItem()) {
             selection_.selectEntity(id);
             if (ImGui::MenuItem("Delete")) {
-                auto cmd = std::make_unique<DeleteEntityCommand>(id);
-                commands_.push(std::move(cmd), scene_);
-                gpuData_.erase(id);
-                selection_.clear();
+                commands_.push(std::make_unique<DeleteEntityCommand>(id), scene_);
+                gpuData_.erase(id); selection_.clear(); faceSelection_.clear();
             }
-            if (isBrush && ImGui::MenuItem("Frame Camera")) {
+            if (isBE && ImGui::MenuItem("Frame Camera")) {
                 const auto* be = std::get_if<scene::BrushEntity>(&entity);
                 camera_.frameAABB(be->worldBounds());
             }
+            if (isBE && ImGui::MenuItem("CSG Subtract (this=cutter)")) {
+                selection_.selectEntity(id);
+                applyCSGSubtract();
+            }
             ImGui::EndPopup();
         }
-
         if (open) ImGui::TreePop();
     }
-
     ImGui::End();
 }
 
@@ -666,88 +666,105 @@ void EditorApp::drawSceneTree() {
 void EditorApp::drawProperties() {
     ImGui::Begin("Properties");
 
+    // ── Face properties (takes priority when face selected) ──────────────────
+    if (faceSelection_.valid() &&
+        (activeTool_ == ActiveTool::FaceSelect ||
+         activeTool_ == ActiveTool::FaceMove   ||
+         activeTool_ == ActiveTool::Paint))
+    {
+        drawFaceProperties();
+        ImGui::Separator();
+    }
+
+    // ── Clip properties ───────────────────────────────────────────────────────
+    if (activeTool_ == ActiveTool::Clip) {
+        drawClipProperties();
+        ImGui::Separator();
+    }
+
+    // ── Entity properties ─────────────────────────────────────────────────────
     if (!selection_.hasEntity()) {
         ImGui::TextDisabled("Nothing selected.");
-        ImGui::TextDisabled("Click an entity in the viewport or scene tree.");
-        ImGui::End();
-        return;
+        ImGui::End(); return;
     }
 
     auto* entity = scene_.getEntity(selection_.entityId);
     if (!entity) { selection_.clear(); ImGui::End(); return; }
 
-    // Entity header
-    ImGui::TextColored({0.6f, 0.8f, 1.f, 1.f},
-        "Entity #%llu", static_cast<unsigned long long>(selection_.entityId));
+    ImGui::TextColored({0.6f,0.8f,1.f,1.f}, "Entity #%llu",
+        static_cast<unsigned long long>(selection_.entityId));
     ImGui::Separator();
 
-    // ── Name ─────────────────────────────────────────────────────────────────
-    const std::string& curName = scene::entityName(*entity);
-    std::snprintf(renameBuffer_, sizeof(renameBuffer_), "%s", curName.c_str());
+    // Name
+    const std::string& cur = scene::entityName(*entity);
+    std::snprintf(renameBuffer_, sizeof(renameBuffer_), "%s", cur.c_str());
     ImGui::SetNextItemWidth(-1.f);
     if (ImGui::InputText("##name", renameBuffer_, sizeof(renameBuffer_),
                           ImGuiInputTextFlags_EnterReturnsTrue)) {
-        if (renameBuffer_[0] != '\0' && curName != renameBuffer_) {
+        if (renameBuffer_[0] && cur != renameBuffer_)
             commands_.push(std::make_unique<RenameEntityCommand>(
-                selection_.entityId, curName, renameBuffer_), scene_);
-        }
+                selection_.entityId, cur, renameBuffer_), scene_);
     }
-    ImGui::LabelText("Name", "");
 
-    // ── Transform ────────────────────────────────────────────────────────────
+    // Transform
     ImGui::SeparatorText("Transform");
-
     const scene::Transform& tf = scene::entityTransform(*entity);
-    glm::vec3 pos   = glm::vec3(tf.translation);
-    glm::vec3 scale = glm::vec3(tf.scale);
-
+    glm::vec3 pos = glm::vec3(tf.translation);
     ImGui::SetNextItemWidth(-1.f);
-    if (ImGui::DragFloat3("Position##pos", glm::value_ptr(pos), 1.f)) {
+    if (ImGui::DragFloat3("Position", glm::value_ptr(pos), 1.f)) {
         std::visit([&](auto& e) { e.transform.translation = glm::dvec3(pos); }, *entity);
         if (auto it = gpuData_.find(selection_.entityId); it != gpuData_.end())
             it->second.model = glm::mat4(tf.matrix());
     }
 
-    // ── Brush-specific info ───────────────────────────────────────────────────
+    // Brush entity specifics
     if (const auto* be = std::get_if<scene::BrushEntity>(entity)) {
         ImGui::SeparatorText("Brush Entity");
-        ImGui::LabelText("Brushes", "%zu",  be->brushes.size());
-        ImGui::LabelText("Faces",   "%zu",  be->faceCount());
-
+        ImGui::LabelText("Brushes", "%zu", be->brushes.size());
+        ImGui::LabelText("Faces",   "%zu", be->faceCount());
         const geo::AABB wb = be->worldBounds();
         if (wb.isValid()) {
-            const glm::vec3 ext = glm::vec3(wb.extents());
-            ImGui::LabelText("Extents",
-                "%.0f × %.0f × %.0f", ext.x, ext.y, ext.z);
+            const glm::vec3 e = glm::vec3(wb.extents());
+            ImGui::LabelText("Extents", "%.0f × %.0f × %.0f", e.x, e.y, e.z);
         }
-
-        bool solid   = be->solid;
-        bool visible = be->visible;
-        if (ImGui::Checkbox("Solid",   &solid))
-            const_cast<scene::BrushEntity*>(be)->solid   = solid;
+        bool solid = be->solid, vis = be->visible;
+        if (ImGui::Checkbox("Solid",   &solid))   const_cast<scene::BrushEntity*>(be)->solid   = solid;
         ImGui::SameLine();
-        if (ImGui::Checkbox("Visible", &visible))
-            const_cast<scene::BrushEntity*>(be)->visible = visible;
+        if (ImGui::Checkbox("Visible", &vis))     const_cast<scene::BrushEntity*>(be)->visible = vis;
+
+        ImGui::SeparatorText("Operations");
+
+        // CSG Subtract
+        if (ImGui::Button("CSG Subtract (this=cutter)", {-1.f, 0.f}))
+            applyCSGSubtract();
+        ImGui::SetItemTooltip("Carves this entity out of all overlapping solid brushes, then removes it.");
+
+        // Hollow
+        if (be->brushes.size() == 1) {
+            ImGui::SetNextItemWidth(120.f);
+            ImGui::DragScalar("Wall thickness", ImGuiDataType_Double,
+                               &hollowThickness_, 1.0, nullptr, nullptr, "%.0f");
+            ImGui::SameLine();
+            if (ImGui::Button("Hollow")) applyHollow();
+        } else {
+            ImGui::TextDisabled("(Hollow: select single-brush entity)");
+        }
     }
 
-    // ── Point entity info ─────────────────────────────────────────────────────
+    // Point entity specifics
     if (const auto* pe = std::get_if<scene::PointEntity>(entity)) {
         ImGui::SeparatorText("Point Entity");
         ImGui::LabelText("Class", "%s", pe->classname.c_str());
         if (!pe->properties.empty()) {
             ImGui::SeparatorText("Properties");
-            for (const auto& [key, val] : pe->properties) {
-                std::visit([&](const auto& v) {
-                    using T = std::decay_t<decltype(v)>;
-                    if constexpr (std::is_same_v<T, std::string>)
-                        ImGui::LabelText(key.c_str(), "%s", v.c_str());
-                    else if constexpr (std::is_same_v<T, float>)
-                        ImGui::LabelText(key.c_str(), "%.3f", v);
-                    else if constexpr (std::is_same_v<T, int>)
-                        ImGui::LabelText(key.c_str(), "%d", v);
-                    else if constexpr (std::is_same_v<T, bool>)
-                        ImGui::LabelText(key.c_str(), "%s", v ? "true" : "false");
-                }, val);
+            for (const auto& [k, v] : pe->properties) {
+                std::visit([&](const auto& val) {
+                    using T = std::decay_t<decltype(val)>;
+                    if constexpr (std::is_same_v<T,std::string>) ImGui::LabelText(k.c_str(),"%s",val.c_str());
+                    else if constexpr (std::is_same_v<T,float>)  ImGui::LabelText(k.c_str(),"%.3f",val);
+                    else if constexpr (std::is_same_v<T,int>)    ImGui::LabelText(k.c_str(),"%d",val);
+                    else if constexpr (std::is_same_v<T,bool>)   ImGui::LabelText(k.c_str(),"%s",val?"true":"false");
+                }, v);
             }
         }
     }
@@ -755,22 +772,192 @@ void EditorApp::drawProperties() {
     ImGui::End();
 }
 
+// ─── Face properties ─────────────────────────────────────────────────────────
+
+void EditorApp::drawFaceProperties() {
+    ImGui::SeparatorText("Selected Face");
+
+    auto* entity = scene_.getEntity(faceSelection_.entityId);
+    if (!entity) { faceSelection_.clear(); return; }
+    auto* be = std::get_if<scene::BrushEntity>(entity);
+    if (!be || faceSelection_.brushIdx >= be->brushes.size()) { faceSelection_.clear(); return; }
+
+    auto& brush = be->brushes[faceSelection_.brushIdx];
+    if (faceSelection_.faceIdx >= brush.faces.size()) { faceSelection_.clear(); return; }
+    auto& face = brush.faces[faceSelection_.faceIdx];
+
+    // Info
+    ImGui::LabelText("Brush", "%zu / %zu", faceSelection_.brushIdx, be->brushes.size()-1);
+    ImGui::LabelText("Face",  "%zu / %zu", faceSelection_.faceIdx,  brush.faces.size()-1);
+    const glm::vec3 n = glm::vec3(face.plane.normal);
+    ImGui::LabelText("Normal", "%.2f  %.2f  %.2f", n.x, n.y, n.z);
+
+    // Plane distance (face move tool)
+    if (activeTool_ == ActiveTool::FaceMove) {
+        float dist = static_cast<float>(face.plane.distance);
+        ImGui::SetNextItemWidth(-1.f);
+        if (ImGui::DragFloat("Plane Distance", &dist, 0.5f, -4096.f, 4096.f)) {
+            face.plane.distance = static_cast<double>(dist);
+            brush.invalidate();
+            rebuildEntityMesh(faceSelection_.entityId);
+        }
+        ImGui::SetItemTooltip("Moves the face along its normal. No undo — use with care.");
+    }
+
+    // Material
+    ImGui::SeparatorText("Material");
+    char matBuf[256];
+    std::snprintf(matBuf, sizeof(matBuf), "%s", face.materialId.c_str());
+    ImGui::SetNextItemWidth(-1.f);
+    if (ImGui::InputText("##mat", matBuf, sizeof(matBuf),
+                          ImGuiInputTextFlags_EnterReturnsTrue)) {
+        if (face.materialId != matBuf) {
+            commands_.push(std::make_unique<SetFaceMaterialCommand>(
+                faceSelection_.entityId, faceSelection_.brushIdx, faceSelection_.faceIdx,
+                face.materialId, matBuf), scene_);
+            rebuildEntityMesh(faceSelection_.entityId);
+            setStatus(std::format("Painted '{}'", matBuf));
+        }
+    }
+    ImGui::LabelText("Material##lbl","");
+
+    // UV controls
+    ImGui::SeparatorText("UV Mapping");
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::DragFloat2("Offset", glm::value_ptr(face.uvOffset), 0.5f);
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::DragFloat2("Scale",  glm::value_ptr(face.uvScale),  0.01f, 0.01f, 64.f);
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::DragFloat("Rotation",&face.uvRotation, 1.f, -180.f, 180.f);
+
+    // Apply UV changes
+    if (ImGui::IsItemDeactivatedAfterEdit() ||
+        ImGui::IsItemActivated()) // trigger rebuild after any UV drag
+    {
+        rebuildEntityMesh(faceSelection_.entityId);
+    }
+}
+
+// ─── Clip properties ─────────────────────────────────────────────────────────
+
+void EditorApp::drawClipProperties() {
+    ImGui::SeparatorText("Clip Tool");
+
+    if (!selection_.hasEntity()) {
+        ImGui::TextDisabled("Select an entity to clip.");
+        return;
+    }
+
+    // Axis selector
+    ImGui::Text("Clip axis:");
+    ImGui::SameLine();
+    if (ImGui::RadioButton("X", clipState_.axis == ClipAxis::X)) clipState_.axis = ClipAxis::X;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Y", clipState_.axis == ClipAxis::Y)) clipState_.axis = ClipAxis::Y;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Z", clipState_.axis == ClipAxis::Z)) clipState_.axis = ClipAxis::Z;
+
+    // Position
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::DragFloat("Position", &clipState_.position, 1.f, -4096.f, 4096.f);
+
+    // Keep both halves?
+    ImGui::Checkbox("Keep both halves", &clipState_.keepBoth);
+
+    ImGui::Spacing();
+    if (ImGui::Button("Apply Clip", {-1.f, 0.f})) applyClip();
+}
+
+// ─── Apply: clip ─────────────────────────────────────────────────────────────
+
+void EditorApp::applyClip() {
+    auto* entity = scene_.getEntity(selection_.entityId);
+    if (!entity) return;
+    auto* be = std::get_if<scene::BrushEntity>(entity);
+    if (!be || be->brushes.empty()) return;
+
+    // Build the clip plane
+    glm::dvec3 normal{};
+    switch (clipState_.axis) {
+    case ClipAxis::X: normal = {1,0,0}; break;
+    case ClipAxis::Y: normal = {0,1,0}; break;
+    case ClipAxis::Z: normal = {0,0,1}; break;
+    }
+    const geo::Plane clipPlane = geo::Plane::fromNormalPoint(
+        normal, normal * static_cast<double>(clipState_.position));
+
+    // Split all brushes
+    std::vector<geo::Brush> result;
+    for (const auto& brush : be->brushes) {
+        auto [front, back] = geo::splitBrushByPlane(brush, clipPlane);
+        if (front) result.push_back(std::move(*front));
+        if (back  && clipState_.keepBoth) result.push_back(std::move(*back));
+    }
+
+    if (result.empty()) {
+        setStatus("Clip produced no valid brushes.");
+        return;
+    }
+
+    const std::vector<geo::Brush> origBrushes = be->brushes;
+    commands_.push(std::make_unique<ClipBrushCommand>(
+        selection_.entityId, origBrushes, result), scene_);
+
+    rebuildEntityMesh(selection_.entityId);
+    faceSelection_.clear();
+    setStatus(std::format("Clipped → {} brush(es)", result.size()));
+}
+
+// ─── Apply: CSG subtract ─────────────────────────────────────────────────────
+
+void EditorApp::applyCSGSubtract() {
+    if (!selection_.hasEntity()) return;
+    auto* entity = scene_.getEntity(selection_.entityId);
+    if (!entity) return;
+    auto* cutterBE = std::get_if<scene::BrushEntity>(entity);
+    if (!cutterBE) return;
+
+    auto cmd = std::make_unique<CSGSubtractCommand>(
+        selection_.entityId, *cutterBE);
+    commands_.push(std::move(cmd), scene_);
+
+    selection_.clear();
+    faceSelection_.clear();
+    rebuildAllMeshes();
+    setStatus("CSG Subtract applied.");
+}
+
+// ─── Apply: hollow ───────────────────────────────────────────────────────────
+
+void EditorApp::applyHollow() {
+    if (!selection_.hasEntity()) return;
+    auto* entity = scene_.getEntity(selection_.entityId);
+    if (!entity) return;
+    auto* be = std::get_if<scene::BrushEntity>(entity);
+    if (!be || be->brushes.size() != 1) return;
+
+    auto cmd = std::make_unique<HollowEntityCommand>(selection_.entityId, *be);
+    cmd->wallThickness = hollowThickness_;
+    commands_.push(std::move(cmd), scene_);
+
+    selection_.clear();
+    faceSelection_.clear();
+    rebuildAllMeshes();
+    setStatus(std::format("Hollowed with thickness {:.0f}", hollowThickness_));
+}
+
 // ─── Status bar ───────────────────────────────────────────────────────────────
 
 void EditorApp::drawStatusBar() {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     const float h = ImGui::GetFrameHeight() + 4.f;
-
-    ImGui::SetNextWindowPos({ vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - h });
-    ImGui::SetNextWindowSize({ vp->WorkSize.x, h });
+    ImGui::SetNextWindowPos({vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - h});
+    ImGui::SetNextWindowSize({vp->WorkSize.x, h});
     ImGui::SetNextWindowBgAlpha(0.85f);
-
-    ImGuiWindowFlags flags =
-        ImGuiWindowFlags_NoTitleBar  | ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoResize    | ImGuiWindowFlags_NoMove      |
-        ImGuiWindowFlags_NoNav       | ImGuiWindowFlags_NoDocking;
-
-    ImGui::Begin("##status", nullptr, flags);
+    ImGui::Begin("##status", nullptr,
+        ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoScrollbar|
+        ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|
+        ImGuiWindowFlags_NoNav|ImGuiWindowFlags_NoDocking);
 
     if (statusTimer_ > 0.f)
         ImGui::Text("%s", statusMessage_.c_str());
@@ -778,46 +965,34 @@ void EditorApp::drawStatusBar() {
         ImGui::TextDisabled("FORGE Editor  —  %s", scene_.name.c_str());
 
     ImGui::SameLine();
-    const auto stats = scene_.stats();
-    const std::string right = std::format(
-        "  {:3.0f} fps  |  {} DC  |  {} tri  |  {} brushes",
-        window_.fps(),
-        renderer_.drawCallCount(),
-        renderer_.triangleCount(),
-        stats.totalBrushCount);
+    const auto st = scene_.stats();
+    const std::string r = std::format("  {:.0f} fps  |  {} DC  |  {} tri  |  {} brushes",
+        window_.fps(), renderer_.drawCallCount(), renderer_.triangleCount(), st.totalBrushCount);
     ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x
-                         - ImGui::CalcTextSize(right.c_str()).x - 4.f);
-    ImGui::TextDisabled("%s", right.c_str());
-
+                         - ImGui::CalcTextSize(r.c_str()).x - 4.f);
+    ImGui::TextDisabled("%s", r.c_str());
     ImGui::End();
 }
 
 // ─── File I/O ─────────────────────────────────────────────────────────────────
 
-void EditorApp::newScene() {
-    buildDefaultScene();
-}
+void EditorApp::newScene()  { buildDefaultScene(); }
 
 void EditorApp::exportOBJ() {
-    const auto path = std::filesystem::current_path() / (scene_.name + "_export");
-    export_::OBJExportOptions opts;
-    opts.applyTransforms = true;
-    if (export_::exportOBJ(scene_, path, opts)) {
-        setStatus(std::format("Exported OBJ → {}.obj", path.string()));
-    } else {
+    const auto p = std::filesystem::current_path() / (scene_.name + "_export");
+    if (export_::exportOBJ(scene_, p, {}))
+        setStatus(std::format("OBJ → {}.obj", p.string()));
+    else
         setStatus("OBJ export failed.");
-    }
 }
 
 void EditorApp::exportMAP() {
-    const auto path = std::filesystem::current_path() / (scene_.name + ".map");
-    export_::MAPExportOptions opts;
-    opts.mapVersion = 220;
-    if (export_::exportMAP(scene_, path, opts)) {
-        setStatus(std::format("Exported MAP → {}", path.string()));
-    } else {
+    const auto p = std::filesystem::current_path() / (scene_.name + ".map");
+    export_::MAPExportOptions opts; opts.mapVersion = 220;
+    if (export_::exportMAP(scene_, p, opts))
+        setStatus(std::format("MAP → {}", p.string()));
+    else
         setStatus("MAP export failed.");
-    }
 }
 
 // ─── Shutdown ─────────────────────────────────────────────────────────────────

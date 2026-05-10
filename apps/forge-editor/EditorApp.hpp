@@ -2,6 +2,7 @@
 
 #include "Command.hpp"
 #include "Selection.hpp"
+#include "FacePicker.hpp"
 
 #include <forge/gfx.hpp>
 #include <forge/build.hpp>
@@ -19,13 +20,31 @@ namespace forge::editor {
 
 // ─── ActiveTool ───────────────────────────────────────────────────────────────
 
-enum class ActiveTool { Select, Move, Rotate, Scale };
+enum class ActiveTool {
+    Select,      // entity AABB selection
+    Move,        // entity translate (ImGuizmo)
+    Rotate,      // entity rotate
+    Scale,       // entity scale
+    FaceSelect,  // face-level selection (Möller-Trumbore)
+    FaceMove,    // move face along its plane normal
+    Clip,        // define a clip plane and split brush
+    Paint,       // paint material onto faces
+};
+
+// ─── Clip state ───────────────────────────────────────────────────────────────
+
+enum class ClipAxis { X, Y, Z };
+
+struct ClipState {
+    ClipAxis axis     = ClipAxis::Y;
+    float    position = 0.f;
+    bool     keepBoth = true;   // keep front+back (false = keep front only)
+};
 
 // ─── EditorApp ───────────────────────────────────────────────────────────────
 
 class EditorApp {
 public:
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
     [[nodiscard]] bool init();
     void run();
     void shutdown();
@@ -38,6 +57,11 @@ private:
     void rebuildAllMeshes();
     glm::vec3 materialColour(const std::string& matId) const noexcept;
 
+    // ── Destructive operations ────────────────────────────────────────────────
+    void applyClip();
+    void applyCSGSubtract();
+    void applyHollow();
+
     // ── File I/O ──────────────────────────────────────────────────────────────
     void exportOBJ();
     void exportMAP();
@@ -49,14 +73,18 @@ private:
     void drawViewport();
     void drawSceneTree();
     void drawProperties();
+    void drawFaceProperties();   // shown when face is selected
+    void drawClipProperties();   // shown when Clip tool is active
     void drawStatusBar();
     void drawAddPrimitivesMenu();
 
     void setupDefaultDockLayout(ImGuiID dockspaceId);
 
-    // ── Viewport interaction ──────────────────────────────────────────────────
+    // ── Viewport overlays ─────────────────────────────────────────────────────
+    void drawFaceOverlay   (ImVec2 vpPos, ImVec2 vpSize, const glm::mat4& vp);
+    void drawClipPreview   (ImVec2 vpPos, ImVec2 vpSize, const glm::mat4& vp);
     void handleViewportMouse(ImVec2 viewportPos, ImVec2 viewportSize);
-    void drawGizmo(ImVec2 viewportPos, ImVec2 viewportSize);
+    void drawGizmo         (ImVec2 viewportPos, ImVec2 viewportSize);
 
     // ── GL resources ──────────────────────────────────────────────────────────
     gfx::Window       window_;
@@ -66,30 +94,35 @@ private:
     gfx::OrbitCamera  camera_;
 
     // ── Scene + editor state ──────────────────────────────────────────────────
-    scene::Scene scene_;
-    Selection    selection_;
-    CommandStack commands_;
-    ActiveTool   activeTool_  = ActiveTool::Select;
-    bool         showGrid_    = true;
-    bool         wireframe_   = false;
-    bool         layoutReady_ = false;
+    scene::Scene  scene_;
+    Selection     selection_;
+    FaceSelection faceSelection_;
+    CommandStack  commands_;
 
-    // GPU mesh cache: EntityId → list of GPU submeshes
+    ActiveTool    activeTool_  = ActiveTool::Select;
+    ClipState     clipState_;
+    double        hollowThickness_ = 16.0;
+    char          paintMaterial_[256] = "default";
+
+    bool showGrid_    = true;
+    bool wireframe_   = false;
+    bool layoutReady_ = false;
+
+    // GPU mesh cache
     struct EntityGPUData {
         gfx::GPUEntityMesh mesh;
-        glm::mat4          model = glm::mat4(1.f); // world transform snapshot
+        glm::mat4          model = glm::mat4(1.f);
     };
     std::unordered_map<scene::EntityId, EntityGPUData> gpuData_;
 
-    // ── Gizmo drag state ──────────────────────────────────────────────────────
+    // Gizmo drag tracking
     glm::vec3 gizmoDragStartPos_ = {};
     bool      gizmoDragging_     = false;
 
-    // ── UI state ──────────────────────────────────────────────────────────────
-    char renameBuffer_[256] = {};
+    // UI state
+    char  renameBuffer_[256] = {};
     std::string statusMessage_;
     float statusTimer_ = 0.f;
-    std::filesystem::path lastExportPath_;
 
     void setStatus(std::string msg, float duration = 3.f);
 };
