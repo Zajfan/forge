@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "forge",
+  "version": "0.1.0",
+  "description": "Brush geometry kernel and game engine",
+  "dependencies": [
+    {
+      "name": "glm",
+      "version>=": "1.0.1"
+    },
+    {
+      "name": "catch2",
+      "version>=": "3.5.0"
+    },
+    {
+      "name": "nlohmann-json",
+      "version>=": "3.11.3"
+    }
+  ],
+  "builtin-baseline": "c8696863d371ab7f46e213d8f5ca923c4aef2a0",
+  "overrides": []
+}
