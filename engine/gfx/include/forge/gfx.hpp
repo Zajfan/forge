@@ -19,3 +19,6 @@
 #include "forge/gfx/Renderer.hpp"
 #include "forge/gfx/Framebuffer.hpp"
 #include "forge/gfx/GridRenderer.hpp"
+#include "forge/gfx/TextureCache.hpp"
+#include "forge/gfx/SkyboxRenderer.hpp"
+#include "forge/gfx/OrthoCamera.hpp"

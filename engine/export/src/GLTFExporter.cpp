@@ -1,9 +1,10 @@
 #include "forge/export/GLTFExporter.hpp"
 #include <forge/build.hpp>
 
+// STB implementations live in engine/gfx/src/stb_impl.cpp
+#define TINYGLTF_NO_STB_IMAGE
+#define TINYGLTF_NO_STB_IMAGE_WRITE
 #define TINYGLTF_IMPLEMENTATION
-#define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <tiny_gltf.h>
 
 #include <format>

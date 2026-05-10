@@ -67,7 +67,13 @@ bool EditorApp::init() {
 
     if (!renderer_.init()) { std::cerr << "[error] Renderer init\n"; return false; }
     gridRenderer_.init();
+    skyboxRenderer_.init();
+    textureCache_.setTextureRoot(std::filesystem::current_path() / "textures");
     viewportFbo_ = gfx::Framebuffer::create(1024, 600);
+    for (auto& fbo : quadFbos_) fbo = gfx::Framebuffer::create(512, 300);
+    orthoCams_[0].dir = gfx::OrthoCamera::Dir::Top;
+    orthoCams_[1].dir = gfx::OrthoCamera::Dir::Front;
+    orthoCams_[2].dir = gfx::OrthoCamera::Dir::Right;
     buildDefaultScene();
     return true;
 }
@@ -239,6 +245,8 @@ void EditorApp::drawMainMenuBar() {
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Grid",      nullptr, &showGrid_);
         ImGui::MenuItem("Wireframe", "F1",    &wireframe_);
+        ImGui::MenuItem("Skybox",    nullptr, &showSkybox_);
+        ImGui::MenuItem("Fog",       nullptr, &showFog_);
         ImGui::Separator();
         if (ImGui::MenuItem("Frame All","F")) camera_.frameAABB(scene_.worldBounds());
         if (ImGui::MenuItem("Frame Selected",nullptr,false,selection_.hasEntity())) {
@@ -331,6 +339,13 @@ void EditorApp::drawToolbar() {
     ImGui::Checkbox("Grid",&showGrid_); ImGui::SameLine();
     ImGui::Checkbox("Wire",&wireframe_); ImGui::SameLine();
 
+    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+    if (ImGui::Button(viewportLayout_ == ViewportLayout::Single ? "[1]" : "[4]", {30.f, 22.f})) {
+        viewportLayout_ = (viewportLayout_ == ViewportLayout::Single)
+                        ? ViewportLayout::Quad : ViewportLayout::Single;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle 1/4 viewport layout");
+    ImGui::SameLine();
     ImGui::BeginDisabled(!commands_.canUndo());
     if (ImGui::Button("Undo")) { commands_.undo(scene_); rebuildAllMeshes(); }
     ImGui::EndDisabled(); ImGui::SameLine();
@@ -366,6 +381,10 @@ void EditorApp::drawToolbar() {
 // ─── Viewport ─────────────────────────────────────────────────────────────────
 
 void EditorApp::drawViewport() {
+    if (viewportLayout_ == ViewportLayout::Quad) {
+        drawQuadViewport();
+        return;
+    }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.f,0.f});
     ImGui::Begin("Viewport");
     ImGui::PopStyleVar();
@@ -380,12 +399,20 @@ void EditorApp::drawViewport() {
     glClearColor(0.10f,0.10f,0.12f,1.f);
     glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
+    // Skybox (before scene, writes at far depth)
+    if (showSkybox_ && skyboxRenderer_.valid()) {
+        const glm::mat4 invVP = glm::inverse(frame.proj * frame.view);
+        skyboxRenderer_.draw(invVP);
+    }
+
     const float aspect = sz.x / sz.y;
     gfx::RenderFrame frame;
     frame.view      = camera_.viewMatrix();
     frame.proj      = camera_.projMatrix(aspect);
     frame.cameraPos = camera_.position();
-    frame.wireframe = wireframe_;
+    frame.wireframe  = wireframe_;
+    frame.fogColor   = scene_.fog.color;
+    frame.fogDensity = showFog_ ? scene_.fog.density : 0.f;
 
     // Collect point lights from scene
     {
@@ -407,7 +434,8 @@ void EditorApp::drawViewport() {
         for (const auto& sub : data.mesh.submeshes) {
             glm::vec3 col = materialColour(sub.materialId());
             if (sel) col = glm::mix(col, glm::vec3(0.3f,0.65f,1.f), 0.4f);
-            renderer_.submit({ &sub, data.model, col });
+            const uint32_t texId = textureCache_.load(sub.materialId());
+            renderer_.submit({ &sub, data.model, col, texId });
         }
     }
     renderer_.endFrame();
@@ -1076,6 +1104,9 @@ void EditorApp::exportMAP() {
 void EditorApp::shutdown() {
     gpuData_.clear();
     viewportFbo_.destroy();
+    for (auto& fbo : quadFbos_) fbo.destroy();
+    textureCache_.evictAll();
+    skyboxRenderer_.shutdown();
     gridRenderer_.shutdown();
     renderer_.shutdown();
     ImGui_ImplOpenGL3_Shutdown();
@@ -1368,3 +1399,167 @@ void EditorApp::exportGLTF() {
 }
 
 } // namespace forge::editor — Phase 6 additions
+
+// ─── Quad viewport ────────────────────────────────────────────────────────────
+
+namespace forge::editor {
+
+/// Helper: render the scene from one camera into an FBO and return the FBO.
+static void renderToFbo(
+    gfx::Framebuffer&     fbo,
+    ImVec2                sz,
+    gfx::Renderer&        renderer,
+    gfx::GridRenderer&    grid,
+    gfx::SkyboxRenderer&  skybox,
+    gfx::TextureCache&    texCache,
+    const std::unordered_map<scene::EntityId, EditorApp::EntityGPUData>& gpuData,
+    const scene::EntityId selectedId,
+    const glm::mat4&      view,
+    const glm::mat4&      proj,
+    const glm::vec3&      camPos,
+    bool                  wireframe,
+    bool                  showGrid,
+    bool                  showSkybox,
+    bool                  isOrtho,
+    const gfx::RenderFrame& baseFrame)
+{
+    fbo.resize((int)sz.x, (int)sz.y);
+    fbo.bind();
+    glClearColor(0.10f,0.10f,0.12f,1.f);
+    glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+
+    gfx::RenderFrame frame = baseFrame;
+    frame.view      = view;
+    frame.proj      = proj;
+    frame.cameraPos = camPos;
+    frame.wireframe = wireframe;
+
+    if (showSkybox && skybox.valid()) {
+        skybox.draw(glm::inverse(proj * view));
+    }
+
+    renderer.beginFrame(frame);
+    for (const auto& [id, data] : gpuData) {
+        const bool sel = (selectedId == id);
+        for (const auto& sub : data.mesh.submeshes) {
+            glm::vec3 col = {0.7f,0.7f,0.72f};
+            if (sel) col = glm::mix(col, glm::vec3(0.3f,0.65f,1.f), 0.4f);
+            const uint32_t tex = texCache.load(sub.materialId());
+            renderer.submit({ &sub, data.model, col, tex });
+        }
+    }
+    renderer.endFrame();
+
+    if (showGrid && grid.valid() && !isOrtho) {
+        grid.draw(view, proj, 1.f, 16384.f);
+    }
+
+    fbo.unbind();
+}
+
+void EditorApp::drawQuadViewport() {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.f,0.f});
+    ImGui::Begin("Viewport");
+    ImGui::PopStyleVar();
+
+    const ImVec2 total = ImGui::GetContentRegionAvail();
+    if (total.x < 8.f || total.y < 8.f) { ImGui::End(); return; }
+
+    const ImVec2 cellSz = { total.x * 0.5f, total.y * 0.5f };
+    const float  aspect  = cellSz.x / cellSz.y;
+    const glm::vec3 camPos = camera_.position();
+
+    // Build base frame (lights, fog, etc.)
+    gfx::RenderFrame base;
+    base.sunDirection = { -0.5f,-1.f,-0.5f };
+    base.sunColor     = {  1.f, 0.95f, 0.8f };
+    base.sunIntensity = 1.2f;
+    base.ambientColor = { 0.06f, 0.06f, 0.08f };
+    base.fogColor     = scene_.fog.color;
+    base.fogDensity   = showFog_ ? scene_.fog.density : 0.f;
+    {
+        auto lights = scene_.findAllByClassname("light");
+        for (auto& [lid, pe] : lights) {
+            gfx::PointLight pl;
+            pl.position  = glm::vec3(pe->transform.translation);
+            pl.intensity = pe->property<float>("light", 300.f);
+            pl.color     = pe->property<glm::vec3>("_color", glm::vec3{1.f,0.95f,0.8f});
+            pl.radius    = pe->property<float>("radius", 512.f);
+            base.pointLights.push_back(pl);
+        }
+    }
+
+    // Pane configs: [0]=Perspective, [1]=Top, [2]=Front, [3]=Right
+    static const char* kLabels[] = { "Perspective", "Top (-Y)", "Front (+Z)", "Right (-X)" };
+
+    for (int pane = 0; pane < 4; ++pane) {
+        const int col = pane % 2, row = pane / 2;
+        ImVec2 panePos = {
+            ImGui::GetCursorScreenPos().x + col * cellSz.x,
+            ImGui::GetCursorScreenPos().y + row * cellSz.y
+        };
+
+        glm::mat4 view, proj;
+        glm::vec3 eye;
+
+        if (pane == 0) {
+            // Perspective: main orbit camera
+            view  = camera_.viewMatrix();
+            proj  = camera_.projMatrix(aspect);
+            eye   = camPos;
+        } else {
+            // Orthographic: one of the three axis views
+            auto& oc = orthoCams_[pane - 1];
+            view = oc.viewMatrix();
+            proj = oc.projMatrix(cellSz.x, cellSz.y);
+            eye  = { oc.target.x, oc.target.y + 4096.f, oc.target.z }; // approx
+        }
+
+        renderToFbo(quadFbos_[pane], cellSz, renderer_, gridRenderer_,
+                    skyboxRenderer_, textureCache_, gpuData_,
+                    selection_.entityId, view, proj, eye,
+                    wireframe_, showGrid_, showSkybox_, (pane != 0), base);
+
+        // Display sub-viewport
+        if (col == 0 && row == 0) {
+            ImGui::SetCursorScreenPos(panePos);
+        }
+        ImGui::SetCursorScreenPos(panePos);
+        ImGui::Image(
+            reinterpret_cast<ImTextureID>(static_cast<intptr_t>(quadFbos_[pane].colorTexture)),
+            cellSz, {0.f,1.f}, {1.f,0.f});
+
+        // Active pane highlight
+        const bool active = (pane == activeQuadPane_);
+        const ImU32 border = active ? IM_COL32(80,180,255,200) : IM_COL32(60,60,60,120);
+        ImGui::GetWindowDrawList()->AddRect(panePos,
+            {panePos.x + cellSz.x, panePos.y + cellSz.y}, border, 0.f, 0, active ? 2.f : 1.f);
+
+        // Label
+        ImGui::GetWindowDrawList()->AddText(
+            {panePos.x + 4.f, panePos.y + 4.f},
+            IM_COL32(220,220,220,180), kLabels[pane]);
+
+        // Click to activate + input
+        if (ImGui::IsItemClicked()) activeQuadPane_ = pane;
+
+        if (ImGui::IsItemHovered() && pane == activeQuadPane_) {
+            const auto& m = window_.input().mouse;
+            if (pane == 0) {
+                // Perspective: orbit camera
+                if (m.left)  camera_.orbit(m.dx, m.dy);
+                if (m.right || m.middle) camera_.pan(m.dx, m.dy);
+                if (m.scroll != 0.f) camera_.zoom(m.scroll);
+            } else {
+                // Orthographic: pan + zoom
+                auto& oc = orthoCams_[pane - 1];
+                if (m.left || m.right || m.middle) oc.pan(m.dx, m.dy);
+                if (m.scroll != 0.f) oc.zoomBy(m.scroll);
+            }
+        }
+    }
+
+    ImGui::End();
+}
+
+} // namespace forge::editor — Quad viewport

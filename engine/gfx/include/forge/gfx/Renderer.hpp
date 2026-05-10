@@ -39,6 +39,10 @@ struct RenderFrame {
     std::vector<PointLight> pointLights;
 
     bool wireframe = false;
+
+    // Fog (exponential; density=0 disables)
+    glm::vec3 fogColor   = { 0.5f, 0.5f, 0.5f };
+    float     fogDensity = 0.f;
 };
 
 // ─── DrawCall ────────────────────────────────────────────────────────────────
@@ -47,6 +51,7 @@ struct DrawCall {
     const GPUMesh* mesh        = nullptr;
     glm::mat4      modelMatrix = glm::mat4(1.f);
     glm::vec3      albedo      = { 0.7f, 0.7f, 0.72f };
+    uint32_t       textureId   = 0;   ///< GL texture (0 = flat colour)
 };
 
 // ─── Renderer ────────────────────────────────────────────────────────────────

@@ -57,6 +57,13 @@ void Renderer::beginFrame(const RenderFrame& frame) noexcept {
     shader_.setVec3 ("u_cameraPos",     frame.cameraPos);
     shader_.setBool ("u_wireframe",     frame.wireframe);
 
+    // Fog
+    shader_.setVec3 ("u_fogColor",    frame.fogColor);
+    shader_.setFloat("u_fogDensity",  frame.fogDensity);
+
+    // Texture default (off until overridden per-draw)
+    shader_.setBool("u_hasTexture", false);
+
     // Point lights
     const int nLights = static_cast<int>(
         std::min(frame.pointLights.size(), static_cast<std::size_t>(kMaxPointLights)));
@@ -82,7 +89,21 @@ void Renderer::submit(const DrawCall& dc) noexcept {
     shader_.setVec3("u_albedo",       dc.albedo);
     shader_.setFloat("u_roughness",   0.7f);
 
+    // Texture
+    if (dc.textureId != 0) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, dc.textureId);
+        shader_.setBool("u_hasTexture", true);
+        shader_.setInt ("u_albedoMap",  0);
+    } else {
+        shader_.setBool("u_hasTexture", false);
+    }
+
     dc.mesh->draw();
+
+    if (dc.textureId != 0) {
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
 
     ++drawCallCount_;
     triangleCount_ += dc.mesh->indexCount() / 3;

@@ -63,6 +63,7 @@ private:
     void drawMainMenuBar();
     void drawToolbar();
     void drawViewport();
+    void drawQuadViewport();
     void drawSceneTree();
     void drawProperties();
     void drawFaceProperties();
@@ -78,11 +79,23 @@ private:
     void drawGizmo         (ImVec2 pos, ImVec2 sz);
 
     // ── GL resources ──────────────────────────────────────────────────────────
-    gfx::Window       window_;
-    gfx::Renderer     renderer_;
-    gfx::GridRenderer gridRenderer_;
-    gfx::Framebuffer  viewportFbo_;
-    gfx::OrbitCamera  camera_;
+    gfx::Window          window_;
+    gfx::Renderer        renderer_;
+    gfx::GridRenderer    gridRenderer_;
+    gfx::SkyboxRenderer  skyboxRenderer_;
+    gfx::TextureCache    textureCache_;
+    gfx::OrbitCamera     camera_;
+
+    // Multi-viewport
+    ViewportLayout       viewportLayout_  = ViewportLayout::Single;
+    gfx::Framebuffer     viewportFbo_;         // single-view FBO
+    std::array<gfx::Framebuffer, 4> quadFbos_; // quad-view FBOs [persp,top,front,right]
+    std::array<gfx::OrthoCamera,  3> orthoCams_; // top, front, right
+    int                  activeQuadPane_  = 0;  // 0=persp,1=top,2=front,3=right
+
+    // Skybox + fog
+    bool  showSkybox_   = true;
+    bool  showFog_       = false;
 
     // ── Edit state ────────────────────────────────────────────────────────────
     scene::Scene  scene_;
@@ -113,6 +126,7 @@ private:
 
     // ── Status bar ────────────────────────────────────────────────────────────
     std::string statusMessage_;
+    std::string textureRootPath_;  ///< User-set texture search directory
     float       statusTimer_ = 0.f;
     void        setStatus(std::string msg, float dur = 3.f);
 };

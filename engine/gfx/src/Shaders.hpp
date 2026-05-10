@@ -63,6 +63,14 @@ uniform vec3  u_albedo;
 uniform float u_roughness;
 uniform bool  u_wireframe;
 
+// Texture
+uniform bool      u_hasTexture;
+uniform sampler2D u_albedoMap;
+
+// Fog (exponential)
+uniform vec3  u_fogColor;
+uniform float u_fogDensity;  // 0 = off
+
 // Blinn-Phong point-light contribution
 vec3 pointLightContrib(int i, vec3 N, vec3 V, vec3 albedo) {
     vec3  Ld   = u_plPos[i] - v_worldPos;
@@ -89,6 +97,12 @@ void main() {
         return;
     }
 
+    vec3 baseAlbedo = u_albedo;
+    if (u_hasTexture) {
+        vec4 texSample = texture(u_albedoMap, v_uv);
+        baseAlbedo *= texSample.rgb;
+    }
+
     vec3 N = normalize(v_normal);
     vec3 L = normalize(u_sunDirection);
     vec3 V = normalize(u_cameraPos - v_worldPos);
@@ -101,15 +115,22 @@ void main() {
     float spec    = pow(NdotH, shine) * (1.0 - u_roughness) * 0.3;
     float backFill = max(dot(-N, L), 0.0) * 0.05;
 
-    vec3 color = u_ambientColor * u_albedo
-               + u_sunColor * u_sunIntensity * NdotL * u_albedo
+    vec3 color = u_ambientColor * baseAlbedo
+               + u_sunColor * u_sunIntensity * NdotL * baseAlbedo
                + u_sunColor * spec
                + u_albedo * backFill;
 
     // ── Point lights ──────────────────────────────────────────────────────────
     int n = min(u_numPointLights, 8);
     for (int i = 0; i < n; ++i)
-        color += pointLightContrib(i, N, V, u_albedo);
+        color += pointLightContrib(i, N, V, baseAlbedo);
+
+    // ── Fog ──────────────────────────────────────────────────────────────────────
+    if (u_fogDensity > 0.001) {
+        float dist    = length(u_cameraPos - v_worldPos);
+        float fogFact = 1.0 - exp(-u_fogDensity * dist * 0.001);
+        color = mix(color, u_fogColor, clamp(fogFact, 0.0, 1.0));
+    }
 
     // ── Tonemap + gamma ───────────────────────────────────────────────────────
     color = color / (color + vec3(1.0));
@@ -202,6 +223,60 @@ void main() {
     o_color  = (grid(pos, 1.0/64.0, true) + grid(pos, 1.0/512.0, false)) * fade;
     o_color.a *= fade;
     if (o_color.a < 0.01) discard;
+}
+)glsl";
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Skybox vertex shader — fullscreen triangle, writes to far depth
+// ─────────────────────────────────────────────────────────────────────────────
+inline constexpr std::string_view kSkyboxVert = R"glsl(
+#version 460 core
+
+out vec3 v_worldDir;
+uniform mat4 u_invVP;
+
+void main() {
+    // Fullscreen triangle from gl_VertexID
+    vec2 ndc[3] = vec2[](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
+    vec2 p = ndc[gl_VertexID];
+
+    // Unproject to world direction
+    vec4 h = u_invVP * vec4(p, 1.0, 1.0);
+    v_worldDir = h.xyz / h.w;
+
+    // Write at maximum depth so geometry always wins
+    gl_Position = vec4(p, 0.9999, 1.0);
+}
+)glsl";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Skybox fragment shader — horizon-zenith-ground gradient
+// ─────────────────────────────────────────────────────────────────────────────
+inline constexpr std::string_view kSkyboxFrag = R"glsl(
+#version 460 core
+
+in  vec3 v_worldDir;
+out vec4 o_color;
+
+uniform vec3 u_skyZenith;   // colour directly overhead
+uniform vec3 u_skyHorizon;  // colour at eye level
+uniform vec3 u_skyGround;   // colour below horizon
+
+void main() {
+    vec3 d = normalize(v_worldDir);
+    vec3 sky;
+    if (d.y >= 0.0) {
+        // Upper hemisphere: horizon → zenith
+        float t = pow(clamp(d.y, 0.0, 1.0), 0.45);
+        sky = mix(u_skyHorizon, u_skyZenith, t);
+    } else {
+        // Lower hemisphere: horizon → ground
+        float t = pow(clamp(-d.y, 0.0, 1.0), 0.35);
+        sky = mix(u_skyHorizon, u_skyGround, t);
+    }
+    // Simple sun disc: large directional blip for atmosphere
+    o_color = vec4(sky, 1.0);
 }
 )glsl";
 
