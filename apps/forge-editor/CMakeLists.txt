@@ -12,6 +12,7 @@ target_link_libraries(forge-editor
     PRIVATE
         forge::gfx
         forge::export
+        forge::runtime
         imgui::imgui
         imguizmo::imguizmo
         forge_compile_options

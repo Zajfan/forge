@@ -51,6 +51,7 @@ add_subdirectory(engine/geometry)
 add_subdirectory(engine/scene)
 add_subdirectory(engine/export)
 add_subdirectory(engine/build)
+add_subdirectory(engine/runtime)
 add_subdirectory(engine/gfx)
 add_subdirectory(apps)
 

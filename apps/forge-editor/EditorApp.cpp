@@ -124,6 +124,9 @@ void EditorApp::rebuildAllMeshes() {
 
 void EditorApp::run() {
     while (!window_.shouldClose()) {
+        // Route to play mode frame or editor frame
+        if (playMode_) { runPlayFrame(); continue; }
+
         window_.pollEvents();
         statusTimer_ -= window_.deltaTime();
         ImGui_ImplOpenGL3_NewFrame();
@@ -323,6 +326,19 @@ void EditorApp::drawToolbar() {
     ImGui::BeginDisabled(!commands_.canRedo());
     if (ImGui::Button("Redo")) { commands_.redo(scene_); rebuildAllMeshes(); }
     ImGui::EndDisabled();
+
+    // Play / Stop
+    ImGui::SameLine();
+    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, {0.15f, 0.55f, 0.15f, 1.f});
+    if (ImGui::Button(playMode_ ? "  STOP  " : "  PLAY  ", {80.f, 22.f})) {
+        if (!playMode_) enterPlayMode();
+        else            exitPlayMode();
+    }
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(playMode_ ? "Stop (ESC)" : "Enter play mode (F5)");
+    if (!playMode_ && window_.input().keys.f5) enterPlayMode();
 
     // Keyboard shortcuts
     const auto& k = window_.input().keys;
@@ -1005,6 +1021,146 @@ void EditorApp::shutdown() {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
+}
+
+} // namespace forge::editor
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 5 — Play Mode
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#include <forge/runtime.hpp>
+#include <SDL3/SDL.h>
+
+namespace forge::editor {
+
+// ─── Enter play mode ─────────────────────────────────────────────────────────
+
+void EditorApp::enterPlayMode() {
+    if (playMode_) return;
+
+    // Find player spawn position from scene
+    glm::vec3 spawnPos = glm::vec3(camera_.target); // fallback = camera target
+    auto [id, pe] = scene_.findByClassname("info_player_start");
+    if (pe) spawnPos = glm::vec3(pe->transform.translation);
+
+    // Build runtime
+    runtime_ = std::make_unique<runtime::GameRuntime>();
+    if (!runtime_->init(scene_, spawnPos)) {
+        setStatus("[error] Play mode init failed — check console.");
+        runtime_.reset();
+        return;
+    }
+
+    // Capture mouse for FPS look
+    SDL_SetWindowRelativeMouseMode(window_.sdlWindow(), true);
+
+    playMode_ = true;
+    setStatus("▶ Play mode — ESC to stop");
+}
+
+// ─── Exit play mode ──────────────────────────────────────────────────────────
+
+void EditorApp::exitPlayMode() {
+    if (!playMode_) return;
+
+    // Release mouse
+    SDL_SetWindowRelativeMouseMode(window_.sdlWindow(), false);
+
+    if (runtime_) {
+        runtime_->shutdown();
+        runtime_.reset();
+    }
+
+    playMode_ = false;
+    setStatus("■ Stopped play mode");
+}
+
+// ─── Play frame ──────────────────────────────────────────────────────────────
+
+void EditorApp::runPlayFrame() {
+    window_.pollEvents();
+
+    if (window_.input().keys.escape) {
+        exitPlayMode();
+        return;
+    }
+
+    const float dt     = window_.deltaTime();
+    const float aspect = window_.aspectRatio();
+
+    // Step runtime (physics + player)
+    runtime_->update(dt, window_.input());
+
+    // Render full-screen (no FBO, no docking — covers entire window)
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, window_.width(), window_.height());
+    glClearColor(0.10f, 0.10f, 0.12f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    gfx::RenderFrame frame;
+    frame.view      = runtime_->viewMatrix();
+    frame.proj      = runtime_->projMatrix(aspect);
+    frame.cameraPos = runtime_->cameraPosition();
+    frame.wireframe = false;
+
+    renderer_.beginFrame(frame);
+    for (const auto& [id, data] : gpuData_) {
+        for (const auto& sub : data.mesh.submeshes)
+            renderer_.submit({ &sub, data.model, materialColour(sub.materialId()) });
+    }
+    renderer_.endFrame();
+
+    // ImGui HUD
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
+    ImGui::NewFrame();
+    drawPlayHUD();
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    window_.swapBuffers();
+}
+
+// ─── Play HUD ────────────────────────────────────────────────────────────────
+
+void EditorApp::drawPlayHUD() {
+    // Crosshair
+    {
+        const float cx = window_.width()  * 0.5f;
+        const float cy = window_.height() * 0.5f;
+        const float r  = 8.f;
+        const float gap = 3.f;
+        auto* dl = ImGui::GetForegroundDrawList();
+        const auto col = IM_COL32(220, 220, 220, 200);
+        dl->AddLine({cx - r, cy}, {cx - gap, cy}, col, 1.5f);
+        dl->AddLine({cx + gap, cy}, {cx + r, cy}, col, 1.5f);
+        dl->AddLine({cx, cy - r}, {cx, cy - gap}, col, 1.5f);
+        dl->AddLine({cx, cy + gap}, {cx, cy + r}, col, 1.5f);
+    }
+
+    // Info overlay (top-left)
+    ImGui::SetNextWindowPos({8.f, 8.f}, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::Begin("##playhud", nullptr,
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoDocking);
+
+    ImGui::TextColored({0.4f, 1.f, 0.4f, 1.f}, "▶ PLAY MODE");
+    ImGui::Separator();
+    ImGui::Text("%.0f fps", window_.fps());
+
+    const glm::vec3 pos = runtime_->playerPosition();
+    ImGui::Text("pos  %.0f  %.0f  %.0f", pos.x, pos.y, pos.z);
+    ImGui::Text("yaw  %.0f°", runtime_->playerYaw());
+    ImGui::Text("gnd  %s", runtime_->playerOnGround() ? "yes" : "no");
+
+    ImGui::Separator();
+    ImGui::TextDisabled("WASD  move    Q/E  jump");
+    ImGui::TextDisabled("Shift  sprint");
+    ImGui::TextDisabled("ESC  stop");
+
+    ImGui::End();
 }
 
 } // namespace forge::editor
