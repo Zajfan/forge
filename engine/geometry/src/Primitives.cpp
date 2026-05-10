@@ -1,4 +1,4 @@
-#include "forge/geo/Brush.hpp"
+#include "forge/geo/Primitives.hpp"
 
 #include <cmath>
 #include <numbers>
