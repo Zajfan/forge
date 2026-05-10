@@ -1,0 +1,185 @@
+#pragma once
+#include <string_view>
+
+namespace forge::gfx::shaders {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Brush vertex shader — OpenGL 4.6 Core
+// ─────────────────────────────────────────────────────────────────────────────
+inline constexpr std::string_view kBrushVert = R"glsl(
+#version 460 core
+
+layout(location = 0) in vec3 a_position;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in vec2 a_uv;
+
+// Per-object uniforms
+uniform mat4 u_model;
+uniform mat4 u_mvp;
+uniform mat3 u_normalMatrix;
+
+// Per-vertex outputs
+out vec3 v_worldPos;
+out vec3 v_normal;
+out vec2 v_uv;
+
+void main() {
+    vec4 worldPos = u_model * vec4(a_position, 1.0);
+    v_worldPos    = worldPos.xyz;
+    v_normal      = normalize(u_normalMatrix * a_normal);
+    v_uv          = a_uv;
+    gl_Position   = u_mvp * vec4(a_position, 1.0);
+}
+)glsl";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Brush fragment shader — Blinn-Phong + ambient + gamma correction
+// ─────────────────────────────────────────────────────────────────────────────
+inline constexpr std::string_view kBrushFrag = R"glsl(
+#version 460 core
+
+in vec3 v_worldPos;
+in vec3 v_normal;
+in vec2 v_uv;
+
+out vec4 o_color;
+
+// Lighting
+uniform vec3  u_sunDirection;   // normalised, pointing FROM surface TOWARD sun
+uniform vec3  u_sunColor;
+uniform float u_sunIntensity;
+uniform vec3  u_ambientColor;
+uniform vec3  u_cameraPos;
+
+// Material
+uniform vec3      u_albedo;
+uniform float     u_roughness;
+uniform bool      u_wireframe;
+
+void main() {
+    if (u_wireframe) {
+        o_color = vec4(0.2, 0.8, 0.3, 1.0); // bright green wireframe
+        return;
+    }
+
+    vec3 N = normalize(v_normal);
+    vec3 L = normalize(u_sunDirection);
+    vec3 V = normalize(u_cameraPos - v_worldPos);
+    vec3 H = normalize(L + V);
+
+    // Lambert diffuse
+    float NdotL = max(dot(N, L), 0.0);
+
+    // Blinn-Phong specular
+    float shininess = mix(4.0, 128.0, 1.0 - u_roughness);
+    float NdotH     = max(dot(N, H), 0.0);
+    float spec      = pow(NdotH, shininess) * (1.0 - u_roughness) * 0.3;
+
+    // Back-face contribution (subtle fill light from opposite direction)
+    float backFill = max(dot(-N, L), 0.0) * 0.05;
+
+    vec3 ambient  = u_ambientColor * u_albedo;
+    vec3 diffuse  = u_sunColor * u_sunIntensity * NdotL * u_albedo;
+    vec3 specular = u_sunColor * spec;
+    vec3 fill     = u_albedo * backFill;
+
+    vec3 color = ambient + diffuse + specular + fill;
+
+    // Reinhard tone mapping
+    color = color / (color + vec3(1.0));
+
+    // Gamma correction (sRGB approximation)
+    color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
+
+    o_color = vec4(color, 1.0);
+}
+)glsl";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grid vertex shader — infinite grid in the XZ plane
+// ─────────────────────────────────────────────────────────────────────────────
+inline constexpr std::string_view kGridVert = R"glsl(
+#version 460 core
+
+// Fullscreen triangle trick — no vertex buffer needed
+// gl_VertexID: 0=(−1,−1), 1=(3,−1), 2=(−1,3) → covers entire screen
+out vec3 v_nearPoint;
+out vec3 v_farPoint;
+
+uniform mat4 u_invVP;
+
+vec3 unproject(vec2 p, float z) {
+    vec4 h = u_invVP * vec4(p, z, 1.0);
+    return h.xyz / h.w;
+}
+
+void main() {
+    vec2 ndc[3] = vec2[](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
+    vec2 p  = ndc[gl_VertexID];
+    v_nearPoint = unproject(p,  0.0);
+    v_farPoint  = unproject(p,  1.0);
+    gl_Position = vec4(p, 0.0, 1.0);
+}
+)glsl";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grid fragment shader — world-space grid with anti-aliasing
+// ─────────────────────────────────────────────────────────────────────────────
+inline constexpr std::string_view kGridFrag = R"glsl(
+#version 460 core
+
+in vec3 v_nearPoint;
+in vec3 v_farPoint;
+
+out vec4 o_color;
+
+uniform float u_nearZ;
+uniform float u_farZ;
+uniform mat4  u_proj;
+uniform mat4  u_view;
+
+vec4 grid(vec3 pos, float scale, bool drawAxis) {
+    vec2  coord = pos.xz * scale;
+    vec2  deriv = fwidth(coord);
+    vec2  grid  = abs(fract(coord - 0.5) - 0.5) / deriv;
+    float line  = min(grid.x, grid.y);
+    float minZ  = min(deriv.y, 1.0);
+    float minX  = min(deriv.x, 1.0);
+    vec4  color = vec4(0.3, 0.3, 0.3, 1.0 - min(line, 1.0));
+
+    if (drawAxis) {
+        if (pos.x > -0.1 * minX && pos.x < 0.1 * minX)
+            color.z = 1.0; // Z axis = blue
+        if (pos.z > -0.1 * minZ && pos.z < 0.1 * minZ)
+            color.x = 1.0; // X axis = red
+    }
+    return color;
+}
+
+float computeDepth(vec3 pos) {
+    vec4 clip = u_proj * u_view * vec4(pos, 1.0);
+    return clip.z / clip.w;
+}
+
+float linearDepth(float depth) {
+    return (2.0 * u_nearZ * u_farZ) / (u_farZ + u_nearZ - depth * (u_farZ - u_nearZ));
+}
+
+void main() {
+    float t = -v_nearPoint.y / (v_farPoint.y - v_nearPoint.y);
+    if (t <= 0.0) discard;
+
+    vec3 pos = v_nearPoint + t * (v_farPoint - v_nearPoint);
+
+    gl_FragDepth = computeDepth(pos);
+
+    float lin = linearDepth(gl_FragDepth);
+    float fade = 1.0 - clamp((lin - u_nearZ * 4.0) / (u_farZ * 0.5), 0.0, 1.0);
+
+    o_color  = (grid(pos, 1.0/64.0, true) + grid(pos, 1.0/512.0, false)) * fade;
+    o_color.a *= fade;
+    if (o_color.a < 0.01) discard;
+}
+)glsl";
+
+} // namespace forge::gfx::shaders

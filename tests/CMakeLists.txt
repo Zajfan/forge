@@ -1,5 +1,21 @@
 include(Catch)
 
+# ── Mesh builder tests (no GL dep) ───────────────────────────────────────────
+add_executable(test-build
+    build/test_meshbuilder.cpp
+)
+
+target_link_libraries(test-build
+    PRIVATE
+        forge::build
+        Catch2::Catch2WithMain
+)
+
+catch_discover_tests(test-build
+    TEST_PREFIX  "build."
+    REPORTER     console
+)
+
 # ── Geometry kernel tests ─────────────────────────────────────────────────────
 add_executable(test-geometry
     geo/test_plane.cpp

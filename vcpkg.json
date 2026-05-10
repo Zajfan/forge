@@ -15,6 +15,22 @@
     {
       "name": "nlohmann-json",
       "version>=": "3.11.3"
+    },
+    {
+      "name": "sdl3",
+      "version>=": "3.2.0"
+    },
+    {
+      "name": "glew",
+      "version>=": "2.2.0"
+    },
+    {
+      "name": "imgui",
+      "version>=": "1.91.0",
+      "features": [
+        "sdl3-binding",
+        "opengl3-binding"
+      ]
     }
   ],
   "builtin-baseline": "c8696863d371ab7f46e213d8f5ca923c4aef2a0",
