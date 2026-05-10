@@ -8,6 +8,8 @@ add_library(forge-gfx STATIC
     src/GPUMesh.cpp
     src/Window.cpp
     src/Renderer.cpp
+    src/Framebuffer.cpp
+    src/GridRenderer.cpp
 )
 
 add_library(forge::gfx ALIAS forge-gfx)

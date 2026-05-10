@@ -9,9 +9,13 @@
 //   forge::gfx::GPUMesh, GPUEntityMesh
 //   forge::gfx::OrbitCamera
 //   forge::gfx::Renderer, RenderFrame, DrawCall
+//   forge::gfx::Framebuffer
+//   forge::gfx::GridRenderer
 
 #include "forge/gfx/Window.hpp"
 #include "forge/gfx/Shader.hpp"
 #include "forge/gfx/GPUMesh.hpp"
 #include "forge/gfx/Camera.hpp"
 #include "forge/gfx/Renderer.hpp"
+#include "forge/gfx/Framebuffer.hpp"
+#include "forge/gfx/GridRenderer.hpp"
