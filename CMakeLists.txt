@@ -48,6 +48,9 @@ find_package(Catch2  3      CONFIG REQUIRED)
 
 # ── Subdirectories ────────────────────────────────────────────────────────────
 add_subdirectory(engine/geometry)
+add_subdirectory(engine/scene)
+add_subdirectory(engine/export)
+add_subdirectory(apps)
 
 if(FORGE_BUILD_TESTS)
     enable_testing()
