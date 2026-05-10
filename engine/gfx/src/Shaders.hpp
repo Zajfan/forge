@@ -44,21 +44,48 @@ in vec2 v_uv;
 
 out vec4 o_color;
 
-// Lighting
-uniform vec3  u_sunDirection;   // normalised, pointing FROM surface TOWARD sun
+// ── Directional (sun) light ──────────────────────────────────────────────────
+uniform vec3  u_sunDirection;
 uniform vec3  u_sunColor;
 uniform float u_sunIntensity;
 uniform vec3  u_ambientColor;
 uniform vec3  u_cameraPos;
 
-// Material
-uniform vec3      u_albedo;
-uniform float     u_roughness;
-uniform bool      u_wireframe;
+// ── Point lights (up to 8) ───────────────────────────────────────────────────
+uniform int   u_numPointLights;
+uniform vec3  u_plPos[8];        // world-space position
+uniform vec3  u_plColor[8];      // linear RGB
+uniform float u_plIntensity[8];  // units²
+uniform float u_plRadius[8];     // hard cutoff
+
+// ── Material ─────────────────────────────────────────────────────────────────
+uniform vec3  u_albedo;
+uniform float u_roughness;
+uniform bool  u_wireframe;
+
+// Blinn-Phong point-light contribution
+vec3 pointLightContrib(int i, vec3 N, vec3 V, vec3 albedo) {
+    vec3  Ld   = u_plPos[i] - v_worldPos;
+    float dist = length(Ld);
+    if (dist >= u_plRadius[i]) return vec3(0.0);
+
+    vec3  L       = Ld / dist;
+    // Inverse-square with smooth window
+    float window  = pow(max(0.0, 1.0 - (dist / u_plRadius[i])), 2.0);
+    float atten   = u_plIntensity[i] / (dist * dist + 1.0) * window;
+
+    float NdotL   = max(dot(N, L), 0.0);
+    vec3  H       = normalize(L + V);
+    float NdotH   = max(dot(N, H), 0.0);
+    float shine   = mix(4.0, 64.0, 1.0 - u_roughness);
+    float spec    = pow(NdotH, shine) * (1.0 - u_roughness) * 0.2;
+
+    return (NdotL * albedo + vec3(spec)) * u_plColor[i] * atten;
+}
 
 void main() {
     if (u_wireframe) {
-        o_color = vec4(0.2, 0.8, 0.3, 1.0); // bright green wireframe
+        o_color = vec4(0.2, 0.8, 0.3, 1.0);
         return;
     }
 
@@ -67,30 +94,26 @@ void main() {
     vec3 V = normalize(u_cameraPos - v_worldPos);
     vec3 H = normalize(L + V);
 
-    // Lambert diffuse
-    float NdotL = max(dot(N, L), 0.0);
-
-    // Blinn-Phong specular
-    float shininess = mix(4.0, 128.0, 1.0 - u_roughness);
-    float NdotH     = max(dot(N, H), 0.0);
-    float spec      = pow(NdotH, shininess) * (1.0 - u_roughness) * 0.3;
-
-    // Back-face contribution (subtle fill light from opposite direction)
+    // ── Sun / directional ─────────────────────────────────────────────────────
+    float NdotL   = max(dot(N, L), 0.0);
+    float shine   = mix(4.0, 128.0, 1.0 - u_roughness);
+    float NdotH   = max(dot(N, H), 0.0);
+    float spec    = pow(NdotH, shine) * (1.0 - u_roughness) * 0.3;
     float backFill = max(dot(-N, L), 0.0) * 0.05;
 
-    vec3 ambient  = u_ambientColor * u_albedo;
-    vec3 diffuse  = u_sunColor * u_sunIntensity * NdotL * u_albedo;
-    vec3 specular = u_sunColor * spec;
-    vec3 fill     = u_albedo * backFill;
+    vec3 color = u_ambientColor * u_albedo
+               + u_sunColor * u_sunIntensity * NdotL * u_albedo
+               + u_sunColor * spec
+               + u_albedo * backFill;
 
-    vec3 color = ambient + diffuse + specular + fill;
+    // ── Point lights ──────────────────────────────────────────────────────────
+    int n = min(u_numPointLights, 8);
+    for (int i = 0; i < n; ++i)
+        color += pointLightContrib(i, N, V, u_albedo);
 
-    // Reinhard tone mapping
+    // ── Tonemap + gamma ───────────────────────────────────────────────────────
     color = color / (color + vec3(1.0));
-
-    // Gamma correction (sRGB approximation)
     color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
-
     o_color = vec4(color, 1.0);
 }
 )glsl";

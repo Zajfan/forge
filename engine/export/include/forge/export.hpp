@@ -9,3 +9,4 @@
 
 #include "forge/export/OBJExporter.hpp"
 #include "forge/export/MAPExporter.hpp"
+#include "forge/export/GLTFExporter.hpp"

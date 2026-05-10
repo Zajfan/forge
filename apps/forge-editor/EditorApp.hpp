@@ -5,6 +5,7 @@
 #include "FacePicker.hpp"
 
 #include <forge/gfx.hpp>
+#include <forge/serial.hpp>
 #include <forge/build.hpp>
 #include <forge/export.hpp>
 #include <forge/runtime.hpp>
@@ -46,6 +47,10 @@ private:
     void applyHollow();
     void exportOBJ();
     void exportMAP();
+    void exportGLTF();
+    void saveScene();
+    void saveSceneAs();
+    void openScene();
 
     // ── Play mode ─────────────────────────────────────────────────────────────
     void enterPlayMode();

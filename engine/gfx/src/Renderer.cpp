@@ -3,6 +3,8 @@
 
 #include <GL/glew.h>
 #include <glm/gtc/matrix_inverse.hpp>
+#include <format>
+#include <algorithm>
 #include <iostream>
 
 namespace forge::gfx {
@@ -54,6 +56,18 @@ void Renderer::beginFrame(const RenderFrame& frame) noexcept {
     shader_.setVec3 ("u_ambientColor",  frame.ambientColor);
     shader_.setVec3 ("u_cameraPos",     frame.cameraPos);
     shader_.setBool ("u_wireframe",     frame.wireframe);
+
+    // Point lights
+    const int nLights = static_cast<int>(
+        std::min(frame.pointLights.size(), static_cast<std::size_t>(kMaxPointLights)));
+    shader_.setInt("u_numPointLights", nLights);
+    for (int i = 0; i < nLights; ++i) {
+        const auto& pl = frame.pointLights[i];
+        shader_.setVec3 (std::format("u_plPos[{}]",       i).c_str(), pl.position);
+        shader_.setVec3 (std::format("u_plColor[{}]",     i).c_str(), pl.color);
+        shader_.setFloat(std::format("u_plIntensity[{}]", i).c_str(), pl.intensity);
+        shader_.setFloat(std::format("u_plRadius[{}]",    i).c_str(), pl.radius);
+    }
 }
 
 void Renderer::submit(const DrawCall& dc) noexcept {

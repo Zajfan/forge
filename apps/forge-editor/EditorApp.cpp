@@ -11,6 +11,9 @@
 #include <array>
 #include <format>
 #include <iostream>
+#include <forge/export/GLTFExporter.hpp>
+#include <filesystem>
+#include <functional>
 
 namespace forge::editor {
 
@@ -198,11 +201,16 @@ void EditorApp::drawMainMenuBar() {
     if (!ImGui::BeginMenuBar()) return;
 
     if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("New Scene","Ctrl+N")) newScene();
+        if (ImGui::MenuItem("New Scene",  "Ctrl+N"))    newScene();
+        if (ImGui::MenuItem("Open Scene...","Ctrl+O"))  openScene();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Save",          "Ctrl+S")) saveScene();
+        if (ImGui::MenuItem("Save As..."))               saveSceneAs();
         ImGui::Separator();
         if (ImGui::BeginMenu("Export")) {
-            if (ImGui::MenuItem("OBJ..."))        exportOBJ();
-            if (ImGui::MenuItem("MAP (Valve 220)...")) exportMAP();
+            if (ImGui::MenuItem("OBJ..."))               exportOBJ();
+            if (ImGui::MenuItem("MAP (Valve 220)..."))   exportMAP();
+            if (ImGui::MenuItem("GLTF 2.0 / GLB..."))   exportGLTF();
             ImGui::EndMenu();
         }
         ImGui::EndMenu();
@@ -296,6 +304,8 @@ void EditorApp::drawToolbar() {
             activeTool_ = t;
             if (t != ActiveTool::FaceSelect && t != ActiveTool::FaceMove && t != ActiveTool::Paint)
                 faceSelection_.clear();
+            if (t != ActiveTool::VertexSelect)
+                vertexSelection_.clear();
         }
         if (on) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tip);
@@ -315,6 +325,7 @@ void EditorApp::drawToolbar() {
     btn("FMOV", ActiveTool::FaceMove,   "Move face along normal (Y)");
     btn("CLIP", ActiveTool::Clip,       "Clip brush with plane (C)");
     btn("PAINT",ActiveTool::Paint,      "Paint material (P)");
+    btn("VTEX", ActiveTool::VertexSelect,"Select vertex (V)");
 
     ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
     ImGui::Checkbox("Grid",&showGrid_); ImGui::SameLine();
@@ -376,6 +387,20 @@ void EditorApp::drawViewport() {
     frame.cameraPos = camera_.position();
     frame.wireframe = wireframe_;
 
+    // Collect point lights from scene
+    {
+        auto lights = scene_.findAllByClassname("light");
+        for (auto& [lid, pe] : lights) {
+            gfx::PointLight pl;
+            pl.position  = glm::vec3(pe->transform.translation);
+            pl.intensity = pe->property<float>("light", 300.f);
+            const auto col = pe->property<glm::vec3>("_color", glm::vec3{1.f,0.95f,0.8f});
+            pl.color     = col;
+            pl.radius    = pe->property<float>("radius", 512.f);
+            frame.pointLights.push_back(pl);
+        }
+    }
+
     renderer_.beginFrame(frame);
     for (const auto& [id, data] : gpuData_) {
         const bool sel = (selection_.entityId == id);
@@ -403,6 +428,8 @@ void EditorApp::drawViewport() {
     const glm::mat4 vp = frame.proj * frame.view;
     if (faceSelection_.valid())
         drawFaceOverlay(vpPos, sz, vp);
+    if (vertexSelection_.valid())
+        drawVertexOverlay(vpPos, sz, vp);
     if (activeTool_ == ActiveTool::Clip && selection_.hasEntity())
         drawClipPreview(vpPos, sz, vp);
 
@@ -557,12 +584,38 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
             }
             break;
         }
+        case ActiveTool::VertexSelect: {
+            // Pick closest vertex to click ray
+            const auto hit = pickFace(ndc, scene_, camera_, aspect);
+            if (hit) {
+                // From the hit face, find closest vertex to the actual hit point
+                auto* e = scene_.getEntity(hit->entityId);
+                auto* be = std::get_if<scene::BrushEntity>(e);
+                if (be && hit->brushIdx < be->brushes.size()) {
+                    const auto& verts = be->brushes[hit->brushIdx].vertices();
+                    glm::dvec3 best; float bestD = 1e30f;
+                    for (const auto& v : verts) {
+                        const glm::vec3 wp = glm::vec3(be->transform.transformPoint(v));
+                        const float d = glm::length(wp - hit->point);
+                        if (d < bestD) { bestD = d; best = v; }
+                    }
+                    if (bestD < 1e29f) {
+                        vertexSelection_ = { hit->entityId, hit->brushIdx,
+                            be->transform.transformPoint(best) };
+                        selection_.selectEntity(hit->entityId);
+                    }
+                }
+            } else {
+                vertexSelection_.clear();
+            }
+            break;
+        }
         default: {
-            // Move/Rotate/Scale: entity selection only
             const auto id = pickEntity(ndc, scene_, camera_, aspect);
             if (id != scene::kInvalidEntityId) selection_.selectEntity(id);
             else                               selection_.clear();
             faceSelection_.clear();
+            vertexSelection_.clear();
             break;
         }
         }
@@ -681,6 +734,13 @@ void EditorApp::drawSceneTree() {
 
 void EditorApp::drawProperties() {
     ImGui::Begin("Properties");
+
+    // ── Vertex properties ────────────────────────────────────────────────────
+    if (vertexSelection_.valid() && activeTool_ == ActiveTool::VertexSelect) {
+        drawVertexProperties_impl(*this, scene_, vertexSelection_, commands_,
+            [this](scene::EntityId id) { rebuildEntityMesh(id); });
+        ImGui::Separator();
+    }
 
     // ── Face properties (takes priority when face selected) ──────────────────
     if (faceSelection_.valid() &&
@@ -1104,6 +1164,20 @@ void EditorApp::runPlayFrame() {
     frame.cameraPos = runtime_->cameraPosition();
     frame.wireframe = false;
 
+    // Collect point lights from scene
+    {
+        auto lights = scene_.findAllByClassname("light");
+        for (auto& [lid, pe] : lights) {
+            gfx::PointLight pl;
+            pl.position  = glm::vec3(pe->transform.translation);
+            pl.intensity = pe->property<float>("light", 300.f);
+            const auto col = pe->property<glm::vec3>("_color", glm::vec3{1.f,0.95f,0.8f});
+            pl.color     = col;
+            pl.radius    = pe->property<float>("radius", 512.f);
+            frame.pointLights.push_back(pl);
+        }
+    }
+
     renderer_.beginFrame(frame);
     for (const auto& [id, data] : gpuData_) {
         for (const auto& sub : data.mesh.submeshes)
@@ -1164,3 +1238,133 @@ void EditorApp::drawPlayHUD() {
 }
 
 } // namespace forge::editor
+
+// ─── Phase 6 additions ────────────────────────────────────────────────────────
+
+namespace forge::editor {
+
+// ─── Vertex overlay ───────────────────────────────────────────────────────────
+
+void EditorApp::drawVertexOverlay(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
+    if (!vertexSelection_.valid()) return;
+
+    const ImVec2 screenPt = w2s(glm::vec3(vertexSelection_.position), vp, pos, sz);
+    if (screenPt.x < -1e5f) return;
+
+    auto* dl = ImGui::GetWindowDrawList();
+    // Outer ring
+    dl->AddCircleFilled(screenPt, 8.f,  IM_COL32(255,180,0,200));
+    dl->AddCircle      (screenPt, 8.f,  IM_COL32(255,255,255,200), 12, 1.5f);
+    // Inner dot
+    dl->AddCircleFilled(screenPt, 3.f,  IM_COL32(255,255,255,240));
+
+    // Position label
+    const auto lbl = std::format("({:.0f}, {:.0f}, {:.0f})",
+        vertexSelection_.position.x,
+        vertexSelection_.position.y,
+        vertexSelection_.position.z);
+    dl->AddText({screenPt.x + 12.f, screenPt.y - 8.f},
+                IM_COL32(255,220,80,220), lbl.c_str());
+}
+
+// ─── Vertex properties (shown in drawProperties when vertex is selected) ──────
+// Called from within drawProperties() when activeTool_ == VertexSelect
+
+static void drawVertexProperties_impl(
+    EditorApp& app,
+    scene::Scene& scene,
+    VertexSelection& vs,
+    CommandStack& cmds,
+    const std::function<void(scene::EntityId)>& rebuildFn)
+{
+    ImGui::SeparatorText("Selected Vertex");
+
+    auto* e  = scene.getEntity(vs.entityId);
+    auto* be = e ? std::get_if<scene::BrushEntity>(e) : nullptr;
+    if (!be || vs.brushIdx >= be->brushes.size()) { vs.clear(); return; }
+
+    auto& brush = be->brushes[vs.brushIdx];
+
+    // Convert world-space position back to local space for editing
+    const glm::dvec3 localPos = glm::dvec3(
+        glm::inverse(be->transform.matrix()) * glm::dvec4(vs.position, 1.0));
+
+    glm::vec3 editPos = glm::vec3(vs.position);
+    ImGui::SetNextItemWidth(-1.f);
+
+    const bool changed = ImGui::DragFloat3("World Position",
+        glm::value_ptr(editPos), 0.5f);
+
+    if (changed) {
+        const glm::dvec3 newWorld(editPos);
+        const glm::dvec3 oldWorld = vs.position;
+
+        // Convert to local space
+        const glm::dvec3 oldLocal = glm::dvec3(
+            glm::inverse(be->transform.matrix()) * glm::dvec4(oldWorld, 1.0));
+        const glm::dvec3 newLocal = glm::dvec3(
+            glm::inverse(be->transform.matrix()) * glm::dvec4(newWorld, 1.0));
+
+        // Build command
+        MoveVertexCommand cmd(vs.entityId, vs.brushIdx, oldLocal, newLocal);
+        computeVertexMove(brush, oldLocal, newLocal, cmd);
+
+        if (!cmd.affected.empty()) {
+            cmds.push(std::make_unique<MoveVertexCommand>(std::move(cmd)), scene);
+            rebuildFn(vs.entityId);
+            vs.position = newWorld; // update selection to new position
+        }
+    }
+    ImGui::SetItemTooltip("Drag to move vertex. Adjacent face planes are recomputed.");
+}
+
+// ─── Save / Load ─────────────────────────────────────────────────────────────
+
+void EditorApp::saveScene() {
+    if (currentFile_.empty()) { saveSceneAs(); return; }
+    const auto err = serial::saveScene(scene_, currentFile_);
+    if (err.empty())
+        setStatus(std::format("Saved → {}", currentFile_.string()));
+    else
+        setStatus(std::format("Save failed: {}", err));
+}
+
+void EditorApp::saveSceneAs() {
+    // Simple path construction: <cwd>/<scene_name>.forge
+    currentFile_ = std::filesystem::current_path() / (scene_.name + ".forge");
+    saveScene();
+}
+
+void EditorApp::openScene() {
+    // Prompt via ImGui modal on next frame (simple implementation)
+    // For now: open <cwd>/<scene_name>.forge
+    const auto path = std::filesystem::current_path() / (scene_.name + ".forge");
+    auto result = serial::loadScene(path);
+    if (result) {
+        scene_ = std::move(*result);
+        selection_.clear(); faceSelection_.clear(); vertexSelection_.clear();
+        commands_.clear(); gpuData_.clear();
+        rebuildAllMeshes();
+        camera_.frameAABB(scene_.worldBounds());
+        currentFile_ = path;
+        setStatus(std::format("Opened '{}'", path.string()));
+    } else {
+        setStatus(std::format("Open failed: {}", result.error()));
+    }
+}
+
+// ─── GLTF export ─────────────────────────────────────────────────────────────
+
+void EditorApp::exportGLTF() {
+    const auto p = std::filesystem::current_path() / scene_.name;
+    export_::GLTFExportOptions opts;
+    opts.binary = true;
+    opts.applyTransforms = true;
+    const auto err = export_::exportGLTF(scene_, p, opts);
+    if (err.empty())
+        setStatus(std::format("GLTF → {}.glb", p.string()));
+    else
+        setStatus(std::format("GLTF failed: {}", err));
+}
+
+} // namespace forge::editor — Phase 6 additions

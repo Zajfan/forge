@@ -306,3 +306,73 @@ struct CSGSubtractCommand final : Command {
 };
 
 } // namespace forge::editor
+
+// ─── Move vertex ─────────────────────────────────────────────────────────────
+// Moves one vertex of a brush by recomputing the adjacent face planes.
+// Stores per-face plane snapshots for exact undo.
+
+struct MoveVertexCommand final : Command {
+    scene::EntityId entityId;
+    std::size_t     brushIdx;
+    glm::dvec3      oldPos;
+    glm::dvec3      newPos;
+
+    struct FacePlane { std::size_t faceIdx; geo::Plane before; geo::Plane after; };
+    std::vector<FacePlane> affected;
+
+    MoveVertexCommand(scene::EntityId id, std::size_t bi,
+                      glm::dvec3 oP, glm::dvec3 nP)
+        : entityId(id), brushIdx(bi), oldPos(oP), newPos(nP) {}
+
+    void execute(scene::Scene& s) override { apply(s, true); }
+    void undo   (scene::Scene& s) override { apply(s, false); }
+    std::string describe() const override  { return "Move vertex"; }
+
+private:
+    void apply(scene::Scene& s, bool forward) {
+        auto* e = s.getEntity(entityId);
+        if (!e) return;
+        auto* be = std::get_if<scene::BrushEntity>(e);
+        if (!be || brushIdx >= be->brushes.size()) return;
+        auto& brush = be->brushes[brushIdx];
+
+        for (auto& fp : affected) {
+            if (fp.faceIdx < brush.faces.size())
+                brush.faces[fp.faceIdx].plane = forward ? fp.after : fp.before;
+        }
+        brush.invalidate();
+    }
+};
+
+/// Compute the new face planes after moving vertex oldPos → newPos in brush.
+/// Fills cmd.affected with per-face plane snapshots.
+inline void computeVertexMove(geo::Brush& brush,
+                               glm::dvec3  oldPos,
+                               glm::dvec3  newPos,
+                               MoveVertexCommand& cmd)
+{
+    constexpr double eps = 1e-3;
+    const auto& polys = brush.allFacePolygons();
+
+    for (std::size_t fi = 0; fi < brush.faces.size(); ++fi) {
+        const auto& poly = polys[fi];
+        for (std::size_t vi = 0; vi < poly.size(); ++vi) {
+            if (glm::length(poly[vi] - oldPos) > eps) continue;
+
+            const std::size_t n     = poly.size();
+            const glm::dvec3& vPrev = poly[(vi + n - 1) % n];
+            const glm::dvec3& vNext = poly[(vi + 1)     % n];
+
+            // New plane through vPrev, newPos, vNext  (same CCW winding as before)
+            const geo::Plane newPlane = geo::Plane::fromPoints(vPrev, newPos, vNext);
+
+            // Sanity: normal must agree with the old normal direction
+            // (large disagreement = degenerate move — skip)
+            if (glm::dot(newPlane.normal, brush.faces[fi].plane.normal) < 0.0)
+                continue;  // skip face if winding flipped
+
+            cmd.affected.push_back({ fi, brush.faces[fi].plane, newPlane });
+            break; // each face contains the vertex at most once
+        }
+    }
+}

@@ -1,4 +1,5 @@
 find_package(imgui    CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 find_package(imguizmo CONFIG REQUIRED)
 
 add_executable(forge-editor
