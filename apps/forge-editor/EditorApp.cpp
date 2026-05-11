@@ -86,6 +86,7 @@ bool EditorApp::init() {
     orthoCams_[0].dir = gfx::OrthoCamera::Dir::Top;
     orthoCams_[1].dir = gfx::OrthoCamera::Dir::Front;
     orthoCams_[2].dir = gfx::OrthoCamera::Dir::Right;
+    materialEditor_.setMaterialLibrary(&materialLibrary_);
     buildDefaultScene();
     return true;
 }
@@ -191,7 +192,7 @@ void EditorApp::drawFrame() {
     drawSceneTree();
     drawProperties();
     drawStatusBar();
-    if (showMaterialBrowser_) drawMaterialBrowser();
+    if (showMaterialEditor_) materialEditor_.draw();
     if (showUndoHistory_)     drawUndoHistory();
     if (showEntityClasses_)   drawEntityClassBrowser();
     if (showValidation_)      drawValidationPanel();
@@ -298,7 +299,7 @@ void EditorApp::drawMainMenuBar() {
         ImGui::Separator();
         if (ImGui::MenuItem("Frame All","F")) camera_.frameAABB(scene_.worldBounds());
         ImGui::Separator();
-        ImGui::MenuItem("Material Browser", nullptr, &showMaterialBrowser_);
+        ImGui::MenuItem("Material Editor", nullptr, &showMaterialEditor_);
         ImGui::MenuItem("Undo History",     nullptr, &showUndoHistory_);
         ImGui::MenuItem("Entity Classes",   nullptr, &showEntityClasses_);
         ImGui::MenuItem("Validation",       nullptr, &showValidation_);
