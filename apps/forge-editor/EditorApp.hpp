@@ -3,6 +3,9 @@
 #include "Command.hpp"
 #include "Selection.hpp"
 #include "FacePicker.hpp"
+#include "GridSnap.hpp"
+#include "EntityRegistry.hpp"
+#include "PrefabSystem.hpp"
 
 #include <forge/gfx.hpp>
 #include <forge/serial.hpp>
@@ -43,6 +46,8 @@ private:
 
     // ── Operations ───────────────────────────────────────────────────────────
     void applyClip();
+    void savePrefabFromSelection();
+    void insertPrefab();
     void applyCSGSubtract();
     void applyHollow();
     void exportOBJ();
@@ -66,6 +71,9 @@ private:
     void drawQuadViewport();
     void drawSceneTree();
     void drawProperties();
+    void drawMaterialBrowser();
+    void drawUndoHistory();
+    void drawEntityClassBrowser();
     void drawFaceProperties();
     void drawClipProperties();
     void drawStatusBar();

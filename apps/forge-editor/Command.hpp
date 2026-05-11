@@ -376,3 +376,44 @@ inline void computeVertexMove(geo::Brush& brush,
         }
     }
 }
+
+// ─── Snap all entities to grid ────────────────────────────────────────────────
+
+struct SnapToGridCommand final : Command {
+    double gridSize;
+
+    struct EntitySnap {
+        scene::EntityId id;
+        glm::dvec3      before;
+        glm::dvec3      after;
+    };
+    std::vector<EntitySnap> snaps;
+
+    explicit SnapToGridCommand(double g) : gridSize(g) {}
+
+    void execute(scene::Scene& s) override {
+        snaps.clear();
+        for (auto& [id, entity] : s.entities) {
+            const glm::dvec3 before = scene::entityTransform(entity).translation;
+            const glm::dvec3 after  = {
+                std::round(before.x / gridSize) * gridSize,
+                std::round(before.y / gridSize) * gridSize,
+                std::round(before.z / gridSize) * gridSize,
+            };
+            if (glm::length(after - before) > 1e-6) {
+                snaps.push_back({ id, before, after });
+                std::visit([&](auto& e){ e.transform.translation = after; }, entity);
+            }
+        }
+    }
+
+    void undo(scene::Scene& s) override {
+        for (const auto& snap : snaps)
+            if (auto* e = s.getEntity(snap.id))
+                std::visit([&](auto& ent){ ent.transform.translation = snap.before; }, *e);
+    }
+
+    std::string describe() const override {
+        return std::format("Snap {} entities to grid ({})", snaps.size(), gridSize);
+    }
+};

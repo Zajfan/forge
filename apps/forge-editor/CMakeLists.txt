@@ -5,6 +5,8 @@ find_package(imguizmo CONFIG REQUIRED)
 add_executable(forge-editor
     main.cpp
     EditorApp.cpp
+    EntityRegistry.cpp
+    PrefabSystem.cpp
 )
 
 target_include_directories(forge-editor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

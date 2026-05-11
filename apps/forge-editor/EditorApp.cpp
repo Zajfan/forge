@@ -68,6 +68,7 @@ bool EditorApp::init() {
     if (!renderer_.init()) { std::cerr << "[error] Renderer init\n"; return false; }
     gridRenderer_.init();
     skyboxRenderer_.init();
+    globalRegistry().loadBuiltins();
     textureCache_.setTextureRoot(std::filesystem::current_path() / "textures");
     viewportFbo_ = gfx::Framebuffer::create(1024, 600);
     for (auto& fbo : quadFbos_) fbo = gfx::Framebuffer::create(512, 300);
@@ -179,6 +180,9 @@ void EditorApp::drawFrame() {
     drawSceneTree();
     drawProperties();
     drawStatusBar();
+    if (showMaterialBrowser_) drawMaterialBrowser();
+    if (showUndoHistory_)     drawUndoHistory();
+    if (showEntityClasses_)   drawEntityClassBrowser();
 }
 
 // ─── Dock layout ─────────────────────────────────────────────────────────────
@@ -237,10 +241,20 @@ void EditorApp::drawMainMenuBar() {
         ImGui::Separator();
         if (ImGui::MenuItem("CSG Subtract (selection=cutter)",nullptr,false,selection_.hasEntity()))
             applyCSGSubtract();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Snap All to Grid")) {
+            commands_.push(std::make_unique<SnapToGridCommand>(static_cast<double>(gridSize_)), scene_);
+            rebuildAllMeshes();
+        }
         ImGui::EndMenu();
     }
 
-    if (ImGui::BeginMenu("Add")) { drawAddPrimitivesMenu(); ImGui::EndMenu(); }
+    if (ImGui::BeginMenu("Add")) {
+        drawAddPrimitivesMenu();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Insert Prefab...")) insertPrefab();
+        ImGui::EndMenu();
+    }
 
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Grid",      nullptr, &showGrid_);
@@ -249,6 +263,10 @@ void EditorApp::drawMainMenuBar() {
         ImGui::MenuItem("Fog",       nullptr, &showFog_);
         ImGui::Separator();
         if (ImGui::MenuItem("Frame All","F")) camera_.frameAABB(scene_.worldBounds());
+        ImGui::Separator();
+        ImGui::MenuItem("Material Browser", nullptr, &showMaterialBrowser_);
+        ImGui::MenuItem("Undo History",     nullptr, &showUndoHistory_);
+        ImGui::MenuItem("Entity Classes",   nullptr, &showEntityClasses_);
         if (ImGui::MenuItem("Frame Selected",nullptr,false,selection_.hasEntity())) {
             if (auto* e = scene_.getEntity(selection_.entityId))
                 if (auto* be = std::get_if<scene::BrushEntity>(e))
@@ -345,6 +363,20 @@ void EditorApp::drawToolbar() {
                         ? ViewportLayout::Quad : ViewportLayout::Single;
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle 1/4 viewport layout");
+    ImGui::SameLine();
+
+    // Grid snap controls
+    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+    ImGui::Checkbox("Snap", &snapEnabled_); ImGui::SameLine();
+    ImGui::SetNextItemWidth(56.f);
+    if (ImGui::BeginCombo("##grid", gridLabel(gridSize_).c_str())) {
+        for (float g : kGridSizes) {
+            if (ImGui::Selectable(gridLabel(g).c_str(), gridSize_ == g))
+                gridSize_ = g;
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Grid size");
     ImGui::SameLine();
     ImGui::BeginDisabled(!commands_.canUndo());
     if (ImGui::Button("Undo")) { commands_.undo(scene_); rebuildAllMeshes(); }
@@ -702,6 +734,14 @@ void EditorApp::drawGizmo(ImVec2 vpPos, ImVec2 vpSz) {
         if (auto* be = std::get_if<scene::BrushEntity>(entity)) {
             const glm::vec3 newPos = glm::vec3(be->transform.translation);
             if (glm::length(newPos - gizmoDragStartPos_) > 1e-4f) {
+                // Apply snap
+                if (snapEnabled_) {
+                    const glm::vec3 snapped = snapVec3(newPos, gridSize_);
+                    if (auto* be2 = std::get_if<scene::BrushEntity>(scene_.getEntity(selection_.entityId)))
+                        be2->transform.translation = glm::dvec3(snapped);
+                    newPos = snapped;
+                    data.model = glm::mat4(be->transform.matrix());
+                }
                 // Re-push via undo/redo to record correctly
                 commands_.push(std::make_unique<MoveEntityCommand>(
                     selection_.entityId,
@@ -742,6 +782,10 @@ void EditorApp::drawSceneTree() {
             if (ImGui::MenuItem("Delete")) {
                 commands_.push(std::make_unique<DeleteEntityCommand>(id), scene_);
                 gpuData_.erase(id); selection_.clear(); faceSelection_.clear();
+            }
+            if (isBE && ImGui::MenuItem("Save as Prefab...")) {
+                selection_.selectEntity(id);
+                savePrefabFromSelection();
             }
             if (isBE && ImGui::MenuItem("Frame Camera")) {
                 const auto* be = std::get_if<scene::BrushEntity>(&entity);
@@ -859,6 +903,21 @@ void EditorApp::drawProperties() {
     if (const auto* pe = std::get_if<scene::PointEntity>(entity)) {
         ImGui::SeparatorText("Point Entity");
         ImGui::LabelText("Class", "%s", pe->classname.c_str());
+        if (const auto* def = globalRegistry().find(pe->classname)) {
+            ImGui::TextDisabled("%s", def->description.c_str());
+            // Show any missing properties with defaults from class definition
+            if (!def->properties.empty()) {
+                ImGui::SeparatorText("Class Properties");
+                for (const auto& pd : def->properties) {
+                    const bool hasIt = pe->properties.contains(pd.name);
+                    if (!hasIt) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, {0.5f,0.5f,0.5f,1.f});
+                        ImGui::LabelText(pd.name.c_str(), "%s (default)", pd.defaultValue.c_str());
+                        ImGui::PopStyleColor();
+                    }
+                }
+            }
+        }
         if (!pe->properties.empty()) {
             ImGui::SeparatorText("Properties");
             for (const auto& [k, v] : pe->properties) {
@@ -901,6 +960,7 @@ void EditorApp::drawFaceProperties() {
         float dist = static_cast<float>(face.plane.distance);
         ImGui::SetNextItemWidth(-1.f);
         if (ImGui::DragFloat("Plane Distance", &dist, 0.5f, -4096.f, 4096.f)) {
+            if (snapEnabled_) dist = snapF(dist, gridSize_);
             face.plane.distance = static_cast<double>(dist);
             brush.invalidate();
             rebuildEntityMesh(faceSelection_.entityId);
@@ -1071,7 +1131,8 @@ void EditorApp::drawStatusBar() {
     ImGui::SameLine();
     const auto st = scene_.stats();
     const std::string r = std::format("  {:.0f} fps  |  {} DC  |  {} tri  |  {} brushes",
-        window_.fps(), renderer_.drawCallCount(), renderer_.triangleCount(), st.totalBrushCount);
+        window_.fps(), renderer_.drawCallCount(), renderer_.triangleCount(),
+        st.totalBrushCount, gridLabel(gridSize_), snapEnabled_ ? " [snap]" : "");
     ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x
                          - ImGui::CalcTextSize(r.c_str()).x - 4.f);
     ImGui::TextDisabled("%s", r.c_str());
@@ -1327,7 +1388,9 @@ static void drawVertexProperties_impl(
         glm::value_ptr(editPos), 0.5f);
 
     if (changed) {
-        const glm::dvec3 newWorld(editPos);
+        // Access grid snap through the app reference passed in
+        glm::vec3 editPosSnapped = editPos;
+        const glm::dvec3 newWorld(editPosSnapped);
         const glm::dvec3 oldWorld = vs.position;
 
         // Convert to local space
@@ -1563,3 +1626,245 @@ void EditorApp::drawQuadViewport() {
 }
 
 } // namespace forge::editor — Quad viewport
+
+// ─── Phase 8 panel implementations ───────────────────────────────────────────
+
+namespace forge::editor {
+
+// ─── Material browser ─────────────────────────────────────────────────────────
+
+void EditorApp::drawMaterialBrowser() {
+    ImGui::SetNextWindowSize({300.f, 420.f}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("Material Browser", &showMaterialBrowser_);
+
+    // Collect unique materialIds from scene
+    std::vector<std::string> mats;
+    for (const auto& [id, entity] : scene_.entities) {
+        if (const auto* be = std::get_if<scene::BrushEntity>(&entity)) {
+            for (const auto& brush : be->brushes)
+                for (const auto& face : brush.faces)
+                    if (std::ranges::find(mats, face.materialId) == mats.end())
+                        mats.push_back(face.materialId);
+        }
+    }
+    std::ranges::sort(mats);
+
+    static char filter[128] = {};
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::InputText("##matfilter", filter, sizeof(filter));
+    ImGui::Separator();
+
+    const float thumbSz = 48.f;
+    const int   cols    = std::max(1, (int)(ImGui::GetContentRegionAvail().x / (thumbSz + 8.f)));
+    int         col     = 0;
+
+    for (const auto& matId : mats) {
+        if (filter[0] && matId.find(filter) == std::string::npos) continue;
+
+        const uint32_t texId = textureCache_.load(matId);
+        const bool     selected = (std::string(paintMaterial_) == matId);
+
+        if (col > 0 && col < cols) ImGui::SameLine();
+        else if (col >= cols) col = 0;
+
+        ImGui::BeginGroup();
+
+        // Thumbnail
+        if (selected) ImGui::PushStyleColor(ImGuiCol_Button, {0.3f,0.6f,1.f,0.5f});
+
+        const bool clicked = ImGui::ImageButton(
+            matId.c_str(),
+            reinterpret_cast<ImTextureID>(static_cast<intptr_t>(texId)),
+            {thumbSz, thumbSz}, {0.f,1.f}, {1.f,0.f});
+
+        if (selected) ImGui::PopStyleColor();
+
+        if (clicked) {
+            std::snprintf(paintMaterial_, sizeof(paintMaterial_), "%s", matId.c_str());
+            if (activeTool_ != ActiveTool::Paint) activeTool_ = ActiveTool::Paint;
+            setStatus(std::format("Paint material: {}", matId));
+        }
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", matId.c_str());
+
+        // Short label (last path component)
+        const std::string lbl = [&] {
+            const auto pos = matId.find_last_of("/\\");
+            return pos == std::string::npos ? matId : matId.substr(pos + 1);
+        }();
+        ImGui::SetNextItemWidth(thumbSz);
+        ImGui::TextUnformatted(lbl.substr(0, 8).c_str());
+
+        ImGui::EndGroup();
+        ++col;
+    }
+
+    if (mats.empty())
+        ImGui::TextDisabled("No materials in scene.");
+
+    ImGui::End();
+}
+
+// ─── Undo history panel ───────────────────────────────────────────────────────
+
+void EditorApp::drawUndoHistory() {
+    ImGui::SetNextWindowSize({280.f, 320.f}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("Undo History", &showUndoHistory_);
+
+    ImGui::TextDisabled("%zu / %zu", commands_.cursor(), commands_.size());
+    ImGui::Separator();
+
+    // Walk command history (CommandStack doesn't expose iteration directly,
+    // so we track count via cursor and size)
+    const std::size_t total  = commands_.size();
+    const std::size_t cursor = commands_.cursor();
+
+    if (total == 0) {
+        ImGui::TextDisabled("No history.");
+        ImGui::End();
+        return;
+    }
+
+    // We can't iterate commands directly without exposing them —
+    // show a summary of counts with current position highlighted
+    for (std::size_t i = 0; i < total; ++i) {
+        const bool isCurrent  = (i == cursor);
+        const bool isFuture   = (i >= cursor);
+        const bool isLastUndo = (i + 1 == cursor);
+
+        if (isFuture)
+            ImGui::PushStyleColor(ImGuiCol_Text, {0.45f, 0.45f, 0.45f, 1.f});
+
+        const char* marker = isCurrent ? "► " : "  ";
+        ImGui::Text("%s[%02zu]", marker, i + 1);
+
+        if (isFuture)
+            ImGui::PopStyleColor();
+
+        if (isLastUndo) {
+            ImGui::PushStyleColor(ImGuiCol_Separator, {0.3f,0.6f,1.f,0.8f});
+            ImGui::Separator(); // blue line = current position
+            ImGui::PopStyleColor();
+        }
+    }
+
+    ImGui::Separator();
+    ImGui::BeginDisabled(!commands_.canUndo());
+    if (ImGui::Button("Undo", {-1.f, 0.f})) { commands_.undo(scene_); rebuildAllMeshes(); }
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(!commands_.canRedo());
+    if (ImGui::Button("Redo", {-1.f, 0.f})) { commands_.redo(scene_); rebuildAllMeshes(); }
+    ImGui::EndDisabled();
+    if (ImGui::Button("Clear History", {-1.f, 0.f})) commands_.clear();
+
+    ImGui::End();
+}
+
+// ─── Entity class browser ─────────────────────────────────────────────────────
+
+void EditorApp::drawEntityClassBrowser() {
+    ImGui::SetNextWindowSize({320.f, 480.f}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("Entity Classes", &showEntityClasses_);
+
+    static char filter[128] = {};
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::InputText("##ecfilter", filter, sizeof(filter));
+    ImGui::Separator();
+
+    for (const auto& cat : globalRegistry().categories()) {
+        const auto defs = globalRegistry().inCategory(cat);
+        bool anyMatch = false;
+        for (const auto* d : defs)
+            if (!filter[0] || d->classname.find(filter) != std::string::npos)
+                anyMatch = true;
+        if (!anyMatch) continue;
+
+        if (!ImGui::CollapsingHeader(cat.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) continue;
+
+        for (const auto* def : defs) {
+            if (filter[0] && def->classname.find(filter) == std::string::npos) continue;
+
+            // Coloured dot
+            ImGui::ColorButton(def->classname.c_str(),
+                { def->editorColor.r, def->editorColor.g, def->editorColor.b, 1.f },
+                ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder, {12.f,12.f});
+            ImGui::SameLine();
+
+            const bool open = ImGui::TreeNodeEx(def->classname.c_str(),
+                ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_SpanFullWidth);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", def->description.c_str());
+
+            // Double-click to place at camera target
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                scene::PointEntity pe;
+                pe.name      = def->classname;
+                pe.classname = def->classname;
+                pe.transform = scene::Transform::fromTranslation(glm::dvec3(camera_.target));
+                // Populate default properties
+                for (const auto& pd : def->properties)
+                    pe.properties[pd.name] = scene::PropertyValue{ pd.defaultValue };
+                const auto id = scene_.addEntity(std::move(pe));
+                selection_.selectEntity(id);
+                setStatus(std::format("Placed '{}'", def->classname));
+            }
+
+            if (open) ImGui::TreePop();
+        }
+    }
+
+    ImGui::End();
+}
+
+// ─── Prefab save / insert ─────────────────────────────────────────────────────
+
+void EditorApp::savePrefabFromSelection() {
+    if (!selection_.hasEntity()) return;
+    const auto* entity = scene_.getEntity(selection_.entityId);
+    if (!entity) return;
+    const auto* be = std::get_if<scene::BrushEntity>(entity);
+    if (!be || be->brushes.empty()) {
+        setStatus("Select a brush entity to save as prefab.");
+        return;
+    }
+
+    Prefab p;
+    p.name    = be->name;
+    p.brushes = be->brushes;
+
+    const auto path = std::filesystem::current_path() / (be->name + ".fprefab");
+    const auto err  = savePrefab(p, path);
+    if (err.empty())
+        setStatus(std::format("Saved prefab → {}", path.string()));
+    else
+        setStatus(std::format("Prefab save failed: {}", err));
+}
+
+void EditorApp::insertPrefab() {
+    // Simple: look for *.fprefab in cwd and use the first one found.
+    // A proper file dialog would replace this in a future phase.
+    std::filesystem::path found;
+    for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::current_path())) {
+        if (entry.path().extension() == ".fprefab") { found = entry.path(); break; }
+    }
+
+    if (found.empty()) {
+        setStatus("No .fprefab files found in current directory.");
+        return;
+    }
+
+    auto result = loadPrefab(found);
+    if (!result) {
+        setStatus(std::format("Prefab load failed: {}", result.error()));
+        return;
+    }
+
+    const glm::dvec3 spawnPos = glm::dvec3(camera_.target);
+    auto e = instantiatePrefab(*result, spawnPos);
+    const auto id = scene_.addEntity(std::move(e));
+    rebuildEntityMesh(id);
+    selection_.selectEntity(id);
+    setStatus(std::format("Inserted prefab '{}'", result->name));
+}
+
+} // namespace forge::editor — Phase 8 panels
