@@ -1,4 +1,5 @@
 find_package(imgui    CONFIG REQUIRED)
+find_package(portable_file_dialogs CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(imguizmo CONFIG REQUIRED)
 
@@ -19,6 +20,7 @@ target_link_libraries(forge-editor
         forge::runtime
         imgui::imgui
         imguizmo::imguizmo
+        portable_file_dialogs::portable_file_dialogs
         forge_compile_options
 )
 

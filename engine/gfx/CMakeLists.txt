@@ -1,7 +1,8 @@
 find_package(SDL3   CONFIG REQUIRED)
 find_package(GLEW   REQUIRED)
 find_package(OpenGL REQUIRED)
-find_package(Stb    REQUIRED)
+find_package(Stb       REQUIRED)
+find_package(tinygltf  CONFIG REQUIRED)
 
 add_library(forge-gfx STATIC
     src/Camera.cpp
@@ -16,6 +17,7 @@ add_library(forge-gfx STATIC
     src/OrthoCamera.cpp
     src/stb_impl.cpp
     src/ShadowMap.cpp
+    src/MeshAssetCache.cpp
 )
 
 add_library(forge::gfx ALIAS forge-gfx)

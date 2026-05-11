@@ -12,7 +12,10 @@
 #include <format>
 #include <iostream>
 #include <forge/export/GLTFExporter.hpp>
+#include <forge/bsp.hpp>
+#include <portable-file-dialogs.h>
 #include <filesystem>
+#include <chrono>
 #include <functional>
 
 namespace forge::editor {
@@ -71,6 +74,7 @@ bool EditorApp::init() {
     shadowMap_.init(2048);
     globalRegistry().loadBuiltins();
     textureCache_.setTextureRoot(std::filesystem::current_path() / "textures");
+    meshAssetCache_.setAssetRoot(std::filesystem::current_path());
     viewportFbo_ = gfx::Framebuffer::create(1024, 600);
     for (auto& fbo : quadFbos_) fbo = gfx::Framebuffer::create(512, 300);
     orthoCams_[0].dir = gfx::OrthoCamera::Dir::Top;
@@ -185,6 +189,7 @@ void EditorApp::drawFrame() {
     if (showUndoHistory_)     drawUndoHistory();
     if (showEntityClasses_)   drawEntityClassBrowser();
     if (showValidation_)      drawValidationPanel();
+    if (showBSPStats_)        drawBSPPanel();
 }
 
 // ─── Dock layout ─────────────────────────────────────────────────────────────
@@ -270,6 +275,9 @@ void EditorApp::drawMainMenuBar() {
         ImGui::MenuItem("Skybox",    nullptr, &showSkybox_);
         ImGui::MenuItem("Fog",       nullptr, &showFog_);
         ImGui::MenuItem("Shadows",   nullptr, &showShadows_);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Build BSP")) buildBSP();
+        ImGui::MenuItem("BSP Stats",    nullptr, &showBSPStats_);
         ImGui::Separator();
         if (ImGui::MenuItem("Frame All","F")) camera_.frameAABB(scene_.worldBounds());
         ImGui::Separator();
@@ -500,6 +508,8 @@ void EditorApp::drawViewport() {
         }
     }
     renderer_.endFrame();
+    // Draw MeshEntities
+    drawMeshEntities(frame);
 
     if (showGrid_ && gridRenderer_.valid())
         gridRenderer_.draw(frame.view, frame.proj, camera_.nearZ, camera_.farZ);
@@ -1173,7 +1183,10 @@ void EditorApp::drawStatusBar() {
 void EditorApp::newScene()  { buildDefaultScene(); }
 
 void EditorApp::exportOBJ() {
-    const auto p = std::filesystem::current_path() / (scene_.name + "_export");
+    auto sel = pfd::save_file("Export OBJ", (std::filesystem::current_path() / (scene_.name)).string(),
+        { "OBJ File", "*.obj", "All Files", "*" }).result();
+    if (sel.empty()) return;
+    const auto p = std::filesystem::path(sel[0]).replace_extension("");
     if (export_::exportOBJ(scene_, p, {}))
         setStatus(std::format("OBJ → {}.obj", p.string()));
     else
@@ -1196,6 +1209,7 @@ void EditorApp::shutdown() {
     viewportFbo_.destroy();
     for (auto& fbo : quadFbos_) fbo.destroy();
     textureCache_.evictAll();
+    meshAssetCache_.evictAll();
     skyboxRenderer_.shutdown();
     shadowMap_.shutdown();
     gridRenderer_.shutdown();
@@ -1454,15 +1468,22 @@ void EditorApp::saveScene() {
 }
 
 void EditorApp::saveSceneAs() {
-    // Simple path construction: <cwd>/<scene_name>.forge
-    currentFile_ = std::filesystem::current_path() / (scene_.name + ".forge");
+    auto result = pfd::save_file(
+        "Save Scene", (currentFile_.empty()
+            ? (std::filesystem::current_path() / (scene_.name + ".forge")).string()
+            : currentFile_.string()),
+        { "FORGE Scene", "*.forge", "All Files", "*" }).result();
+    if (result.empty()) return;
+    currentFile_ = result;
     saveScene();
 }
 
 void EditorApp::openScene() {
-    // Prompt via ImGui modal on next frame (simple implementation)
-    // For now: open <cwd>/<scene_name>.forge
-    const auto path = std::filesystem::current_path() / (scene_.name + ".forge");
+    auto sel = pfd::open_file(
+        "Open Scene", std::filesystem::current_path().string(),
+        { "FORGE Scene", "*.forge", "All Files", "*" }).result();
+    if (sel.empty()) return;
+    const auto path = std::filesystem::path(sel[0]);
     auto result = serial::loadScene(path);
     if (result) {
         scene_ = std::move(*result);
@@ -1480,7 +1501,10 @@ void EditorApp::openScene() {
 // ─── GLTF export ─────────────────────────────────────────────────────────────
 
 void EditorApp::exportGLTF() {
-    const auto p = std::filesystem::current_path() / scene_.name;
+    auto sel = pfd::save_file("Export GLB", (std::filesystem::current_path() / scene_.name).string(),
+        { "GLB File", "*.glb", "All Files", "*" }).result();
+    if (sel.empty()) return;
+    const auto p = std::filesystem::path(sel[0]).replace_extension("");
     export_::GLTFExportOptions opts;
     opts.binary = true;
     opts.applyTransforms = true;
@@ -1871,17 +1895,10 @@ void EditorApp::savePrefabFromSelection() {
 }
 
 void EditorApp::insertPrefab() {
-    // Simple: look for *.fprefab in cwd and use the first one found.
-    // A proper file dialog would replace this in a future phase.
-    std::filesystem::path found;
-    for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::current_path())) {
-        if (entry.path().extension() == ".fprefab") { found = entry.path(); break; }
-    }
-
-    if (found.empty()) {
-        setStatus("No .fprefab files found in current directory.");
-        return;
-    }
+    auto sel = pfd::open_file("Open Prefab", std::filesystem::current_path().string(),
+        { "FORGE Prefab", "*.fprefab", "All Files", "*" }).result();
+    if (sel.empty()) return;
+    std::filesystem::path found = sel[0];
 
     auto result = loadPrefab(found);
     if (!result) {
@@ -2014,3 +2031,110 @@ void EditorApp::duplicateSelection() {
 }
 
 } // namespace forge::editor — Phase 9 additions
+
+// ─── Phase 10 additions ───────────────────────────────────────────────────────
+
+namespace forge::editor {
+
+// ─── BSP build + panel ───────────────────────────────────────────────────────
+
+void EditorApp::buildBSP() {
+    const auto t0 = std::chrono::steady_clock::now();
+
+    bsp::BSPBuildOptions opts;
+    opts.maxDepth     = 20;
+    opts.splitPenalty = 8;
+    opts.verbose      = true;
+
+    bspTree_  = bsp::buildBSP(scene_, opts);
+    bspBuilt_ = true;
+    showBSPStats_ = true;
+
+    const float ms = bspTree_.stats.buildTimeMs;
+    setStatus(std::format("BSP built: {} nodes, {} leaves, {} splits, {:.1f}ms",
+        bspTree_.stats.nodeCount,
+        bspTree_.stats.leafCount,
+        bspTree_.stats.splitCount,
+        ms));
+}
+
+void EditorApp::drawBSPPanel() {
+    ImGui::SetNextWindowSize({300.f, 280.f}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("BSP Statistics", &showBSPStats_);
+
+    if (!bspBuilt_) {
+        ImGui::TextDisabled("BSP not yet compiled.");
+        if (ImGui::Button("Build BSP", {-1.f,0.f})) buildBSP();
+        ImGui::End();
+        return;
+    }
+
+    const auto& s = bspTree_.stats;
+
+    if (ImGui::Button("Rebuild BSP", {-1.f,0.f})) buildBSP();
+    ImGui::Separator();
+
+    ImGui::LabelText("Nodes",       "%d",     s.nodeCount);
+    ImGui::LabelText("Leaves",      "%d",     s.leafCount);
+    ImGui::LabelText("Solid leaves","%d",     s.solidLeaves);
+    ImGui::LabelText("Max depth",   "%d",     s.maxDepth);
+    ImGui::LabelText("Splits",      "%d",     s.splitCount);
+    ImGui::LabelText("Input faces", "%d",     s.inputFaces);
+    ImGui::LabelText("Output faces","%d",     s.outputFaces);
+    ImGui::LabelText("Balance",     "%.2f×",  s.balanceRatio);
+    ImGui::LabelText("Build time",  "%.2f ms",s.buildTimeMs);
+
+    ImGui::Separator();
+
+    // Point-in-solid test at camera position
+    const glm::vec3 camPos = camera_.position();
+    const bool solid = bspTree_.isSolid(camPos);
+    const int  leaf  = bspTree_.leafAt(camPos);
+
+    ImGui::LabelText("Camera leaf",  "%d", leaf);
+    ImGui::LabelText("Camera solid", "%s", solid ? "YES (in wall!)" : "no");
+
+    if (solid)
+        ImGui::TextColored({1.f,0.3f,0.3f,1.f}, "Camera is inside solid geometry!");
+
+    ImGui::Separator();
+
+    // BSP quality feedback
+    if (s.balanceRatio < 1.5f)
+        ImGui::TextColored({0.3f,0.9f,0.3f,1.f}, "Tree balance: excellent");
+    else if (s.balanceRatio < 3.f)
+        ImGui::TextColored({1.f,0.8f,0.2f,1.f}, "Tree balance: acceptable");
+    else
+        ImGui::TextColored({1.f,0.4f,0.4f,1.f}, "Tree balance: poor — geometry may be irregular");
+
+    if (s.splitCount > s.inputFaces)
+        ImGui::TextColored({1.f,0.8f,0.2f,1.f},
+            "High split count — consider simplifying geometry");
+
+    ImGui::End();
+}
+
+// ─── MeshEntity rendering ─────────────────────────────────────────────────────
+
+void EditorApp::drawMeshEntities(const gfx::RenderFrame& frame) {
+    // Render all MeshEntities in the scene using the mesh asset cache
+    for (const auto& [id, entity] : scene_.entities) {
+        const auto* me = std::get_if<scene::MeshEntity>(&entity);
+        if (!me || !me->visible || me->assetPath.empty()) continue;
+
+        const auto* gpu = meshAssetCache_.load(me->assetPath);
+        if (!gpu) continue;
+
+        const glm::mat4 model = glm::mat4(me->transform.matrix());
+        const bool sel = selection_.contains(id);
+
+        for (const auto& sub : gpu->submeshes) {
+            glm::vec3 col = {0.7f,0.7f,0.72f};
+            if (sel) col = glm::mix(col, glm::vec3(0.3f,0.65f,1.f), 0.4f);
+            const uint32_t texId = textureCache_.load(sub.materialId());
+            renderer_.submit({ &sub, model, col, texId });
+        }
+    }
+}
+
+} // namespace forge::editor — Phase 10 additions

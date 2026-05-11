@@ -7,6 +7,7 @@
 #include "EntityRegistry.hpp"
 #include "PrefabSystem.hpp"
 #include "LevelValidator.hpp"
+#include <forge/bsp.hpp>
 
 #include <forge/gfx.hpp>
 #include <forge/serial.hpp>
@@ -78,6 +79,9 @@ private:
     void drawValidationPanel();
     void runValidation();
     void duplicateSelection();
+    void buildBSP();
+    void drawBSPPanel();
+    void drawMeshEntities(const gfx::RenderFrame& frame);
     void drawFaceProperties();
     void drawClipProperties();
     void drawStatusBar();
@@ -114,6 +118,14 @@ private:
     // Validation
     ValidationReport lastValidation_;
     bool             showValidation_ = false;
+
+    // BSP
+    bsp::BSPTree     bspTree_;
+    bool             bspBuilt_    = false;
+    bool             showBSPStats_= false;
+
+    // Mesh asset cache
+    gfx::MeshAssetCache meshAssetCache_;
 
     // ── Edit state ────────────────────────────────────────────────────────────
     scene::Scene  scene_;

@@ -23,3 +23,4 @@
 #include "forge/gfx/SkyboxRenderer.hpp"
 #include "forge/gfx/OrthoCamera.hpp"
 #include "forge/gfx/ShadowMap.hpp"
+#include "forge/gfx/MeshAssetCache.hpp"
