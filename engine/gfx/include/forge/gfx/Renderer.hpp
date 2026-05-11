@@ -3,9 +3,11 @@
 #include "Shader.hpp"
 #include "GPUMesh.hpp"
 #include "Camera.hpp"
+#include "Material.hpp"
 #include <forge/scene.hpp>
 #include <glm/mat4x4.hpp>
 #include <vector>
+#include <memory>
 
 namespace forge::gfx {
 
@@ -53,10 +55,9 @@ struct RenderFrame {
 // ─── DrawCall ────────────────────────────────────────────────────────────────
 
 struct DrawCall {
-    const GPUMesh* mesh        = nullptr;
-    glm::mat4      modelMatrix = glm::mat4(1.f);
-    glm::vec3      albedo      = { 0.7f, 0.7f, 0.72f };
-    uint32_t       textureId   = 0;   ///< GL texture (0 = flat colour)
+    const GPUMesh* mesh              = nullptr;
+    glm::mat4      modelMatrix       = glm::mat4(1.f);
+    std::shared_ptr<Material> material = nullptr;  ///< PBR material
 };
 
 // ─── Renderer ────────────────────────────────────────────────────────────────
@@ -72,10 +73,18 @@ public:
 
     [[nodiscard]] uint32_t drawCallCount() const noexcept { return drawCallCount_; }
     [[nodiscard]] uint32_t triangleCount() const noexcept { return triangleCount_; }
+    
+    void setPBREnabled(bool enabled) noexcept { pbrEnabled_ = enabled; }
+    [[nodiscard]] bool isPBREnabled() const noexcept { return pbrEnabled_; }
+    
+    [[nodiscard]] TextureCache& textureCache() noexcept { return textureCache_; }
 
 private:
-    Shader      shader_;
+    Shader      shader_;           ///< Standard shader
+    Shader      pbrShader_;        ///< PBR shader
+    TextureCache textureCache_;    ///< Texture cache for materials
     RenderFrame frame_;
+    bool        pbrEnabled_ = true;
 
     uint32_t drawCallCount_ = 0;
     uint32_t triangleCount_ = 0;

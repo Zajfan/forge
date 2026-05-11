@@ -65,3 +65,19 @@ catch_discover_tests(test-export
     TEST_PREFIX  "export."
     REPORTER     console
 )
+
+# ── Graphics (material) tests ─────────────────────────────────────────────────
+add_executable(test-gfx
+    gfx/test_material.cpp
+)
+
+target_link_libraries(test-gfx
+    PRIVATE
+        forge::gfx
+        Catch2::Catch2WithMain
+)
+
+catch_discover_tests(test-gfx
+    TEST_PREFIX  "gfx."
+    REPORTER     console
+)

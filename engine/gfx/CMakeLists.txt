@@ -19,6 +19,7 @@ add_library(forge-gfx STATIC
     src/ShadowMap.cpp
     src/MeshAssetCache.cpp
     src/BloomRenderer.cpp
+    src/Material.cpp
 )
 
 add_library(forge::gfx ALIAS forge-gfx)

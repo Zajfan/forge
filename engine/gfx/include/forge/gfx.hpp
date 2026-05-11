@@ -25,3 +25,4 @@
 #include "forge/gfx/ShadowMap.hpp"
 #include "forge/gfx/MeshAssetCache.hpp"
 #include "forge/gfx/BloomRenderer.hpp"
+#include "forge/gfx/Material.hpp"

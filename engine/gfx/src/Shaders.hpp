@@ -388,4 +388,253 @@ void main() {
 }
 )glsl";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PBR (Physically Based Rendering) vertex shader — Cook-Torrance BRDF
+// ─────────────────────────────────────────────────────────────────────────────
+inline constexpr std::string_view kPBRVert = R"glsl(
+#version 460 core
+
+layout(location = 0) in vec3 a_position;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in vec2 a_uv;
+
+uniform mat4 u_model;
+uniform mat4 u_mvp;
+uniform mat3 u_normalMatrix;
+
+out vec3 v_worldPos;
+out vec3 v_normal;
+out vec2 v_uv;
+out vec3 v_tangent;
+
+void main() {
+    vec4 worldPos = u_model * vec4(a_position, 1.0);
+    v_worldPos    = worldPos.xyz;
+    v_normal      = normalize(u_normalMatrix * a_normal);
+    v_uv          = a_uv;
+    v_tangent     = normalize(u_normalMatrix * vec3(1.0, 0.0, 0.0));
+    gl_Position   = u_mvp * vec4(a_position, 1.0);
+}
+)glsl";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PBR fragment shader — Cook-Torrance with metallic/roughness/normal/AO
+// ─────────────────────────────────────────────────────────────────────────────
+inline constexpr std::string_view kPBRFrag = R"glsl(
+#version 460 core
+
+in vec3 v_worldPos;
+in vec3 v_normal;
+in vec2 v_uv;
+in vec3 v_tangent;
+
+out vec4 o_color;
+
+// ── Material ──────────────────────────────────────────────────────────────────
+uniform vec3  u_albedo;
+uniform float u_metallic;
+uniform float u_roughness;
+uniform float u_ao;
+
+// ── Textures ──────────────────────────────────────────────────────────────────
+uniform bool      u_hasAlbedoMap;
+uniform sampler2D u_albedoMap;
+uniform bool      u_hasNormalMap;
+uniform sampler2D u_normalMap;
+uniform float     u_normalScale;
+uniform bool      u_hasMetallicMap;
+uniform sampler2D u_metallicMap;
+uniform bool      u_hasRoughnessMap;
+uniform sampler2D u_roughnessMap;
+uniform bool      u_hasAOMap;
+uniform sampler2D u_aoMap;
+uniform bool      u_hasEmissiveMap;
+uniform sampler2D u_emissiveMap;
+
+// ── Lighting ──────────────────────────────────────────────────────────────────
+uniform vec3  u_sunDirection;
+uniform vec3  u_sunColor;
+uniform float u_sunIntensity;
+uniform vec3  u_ambientColor;
+uniform vec3  u_cameraPos;
+
+// ── Point lights ──────────────────────────────────────────────────────────────
+uniform int   u_numPointLights;
+uniform vec3  u_plPos[8];
+uniform vec3  u_plColor[8];
+uniform float u_plIntensity[8];
+uniform float u_plRadius[8];
+
+// ── Environment ───────────────────────────────────────────────────────────────
+uniform vec3  u_fogColor;
+uniform float u_fogDensity;
+uniform sampler2DShadow u_shadowMap;
+uniform mat4            u_lightSpaceMatrix;
+uniform bool            u_shadowsEnabled;
+
+// Constants
+const float PI = 3.14159265359;
+const float Epsilon = 0.00001;
+
+// Normal perturbation from normal map
+vec3 perturbNormal(vec3 N, vec3 V) {
+    vec3 normal = N;
+    
+    if (u_hasNormalMap) {
+        vec3 T = normalize(v_tangent - dot(v_tangent, N) * N);
+        vec3 B = cross(N, T);
+        mat3 TBN = mat3(T, B, N);
+        
+        vec3 nmap = texture(u_normalMap, v_uv).rgb;
+        nmap = normalize(nmap * 2.0 - 1.0);
+        nmap.xy *= u_normalScale;
+        
+        normal = normalize(TBN * nmap);
+    }
+    
+    return normal;
+}
+
+// Fresnel-Schlick approximation
+vec3 fresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// GGX/Trowbridge-Reitz normal distribution
+float distributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    float num = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = PI * denom * denom;
+    return num / max(denom, Epsilon);
+}
+
+// Schlick-Beckmann geometry shadowing
+float geometrySchlickGGX(float NdotV, float roughness) {
+    float r = (roughness + 1.0);
+    float k = (r * r) / 8.0;
+    float num = NdotV;
+    float denom = NdotV * (1.0 - k) + k;
+    return num / max(denom, Epsilon);
+}
+
+float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx2 = geometrySchlickGGX(NdotV, roughness);
+    float ggx1 = geometrySchlickGGX(NdotL, roughness);
+    return ggx1 * ggx2;
+}
+
+// Cook-Torrance BRDF
+vec3 cookTorrance(vec3 albedo, vec3 N, vec3 V, vec3 L, 
+                   float metallic, float roughness) {
+    vec3 H = normalize(L + V);
+    float NdotL = max(dot(N, L), 0.0);
+    float NdotV = max(dot(N, V), 0.0);
+    
+    // F0 based on metalness
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    
+    // Distribution, Fresnel, Geometry
+    float D = distributionGGX(N, H, roughness);
+    vec3  F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+    float G = geometrySmith(N, V, L, roughness);
+    
+    // Specular component
+    vec3 kS = F;
+    vec3 kD = vec3(1.0) - kS;
+    kD *= 1.0 - metallic;  // Metals have no diffuse
+    
+    vec3 numerator = D * F * G;
+    float denominator = 4.0 * NdotV * NdotL;
+    vec3 specular = numerator / max(denominator, Epsilon);
+    
+    return (kD * albedo / PI + specular) * NdotL;
+}
+
+// Point light contribution (PBR)
+vec3 pointLightPBR(int i, vec3 N, vec3 V, vec3 albedo, 
+                    float metallic, float roughness) {
+    vec3  Ld   = u_plPos[i] - v_worldPos;
+    float dist = length(Ld);
+    if (dist >= u_plRadius[i]) return vec3(0.0);
+    
+    vec3  L       = Ld / dist;
+    float window  = pow(max(0.0, 1.0 - (dist / u_plRadius[i])), 2.0);
+    float atten   = u_plIntensity[i] / (dist * dist + 1.0) * window;
+    
+    return cookTorrance(albedo, N, V, L, metallic, roughness) 
+           * u_plColor[i] * atten;
+}
+
+void main() {
+    // Sample textures
+    vec3 albedo = u_albedo;
+    if (u_hasAlbedoMap) {
+        albedo *= texture(u_albedoMap, v_uv).rgb;
+    }
+    albedo = pow(albedo, vec3(2.2));  // sRGB → linear
+    
+    float metallic = u_metallic;
+    if (u_hasMetallicMap) {
+        metallic *= texture(u_metallicMap, v_uv).r;
+    }
+    
+    float roughness = u_roughness;
+    if (u_hasRoughnessMap) {
+        roughness *= texture(u_roughnessMap, v_uv).r;
+    }
+    roughness = max(roughness, 0.04);  // Clamp to prevent division by zero
+    
+    float ao = u_ao;
+    if (u_hasAOMap) {
+        ao *= texture(u_aoMap, v_uv).r;
+    }
+    
+    vec3 emissive = vec3(0.0);
+    if (u_hasEmissiveMap) {
+        emissive = texture(u_emissiveMap, v_uv).rgb;
+    }
+    
+    // Perturb normal from normal map
+    vec3 N = normalize(v_normal);
+    vec3 V = normalize(u_cameraPos - v_worldPos);
+    N = perturbNormal(N, V);
+    
+    // Sun/directional light
+    vec3 L = normalize(u_sunDirection);
+    vec3 color = cookTorrance(albedo, N, V, L, metallic, roughness)
+                 * u_sunColor * u_sunIntensity;
+    
+    // Ambient + AO
+    color += u_ambientColor * albedo * ao;
+    
+    // Point lights
+    int numPL = min(u_numPointLights, 8);
+    for (int i = 0; i < numPL; ++i) {
+        color += pointLightPBR(i, N, V, albedo, metallic, roughness);
+    }
+    
+    // Emissive
+    color += emissive;
+    
+    // Fog
+    if (u_fogDensity > 0.001) {
+        float dist = length(u_cameraPos - v_worldPos);
+        float fogFact = 1.0 - exp(-u_fogDensity * dist * 0.001);
+        color = mix(color, u_fogColor, clamp(fogFact, 0.0, 1.0));
+    }
+    
+    // Tonemap + gamma
+    color = color / (color + vec3(1.0));
+    color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
+    
+    o_color = vec4(color, 1.0);
+}
+)glsl";
+
 } // namespace forge::gfx::shaders
