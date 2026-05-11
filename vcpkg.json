@@ -26,15 +26,13 @@
     },
     {
       "name": "imgui",
-      "version>=": "1.91.0",
       "features": [
         "sdl3-binding",
         "opengl3-binding"
       ]
     },
     {
-      "name": "imguizmo",
-      "version>=": "1.83"
+      "name": "imguizmo"
     },
     {
       "name": "joltphysics",

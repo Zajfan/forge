@@ -1,4 +1,4 @@
-find_package(JoltPhysics CONFIG REQUIRED)
+find_package(Jolt CONFIG REQUIRED)
 
 add_library(forge-runtime STATIC
     src/PhysicsWorld.cpp
@@ -21,7 +21,7 @@ target_link_libraries(forge-runtime
         forge::gfx         # for InputState
         forge_compile_options
     PRIVATE
-        JoltPhysics::JoltPhysics
+        Jolt::Jolt
 )
 
 target_compile_features(forge-runtime PUBLIC cxx_std_23)

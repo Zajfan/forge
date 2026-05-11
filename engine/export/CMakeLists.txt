@@ -1,4 +1,5 @@
-find_package(tinygltf CONFIG REQUIRED)
+# tinygltf is header-only — no CMake config, use find_path
+find_path(TINYGLTF_INCLUDE_DIR NAMES tiny_gltf.h REQUIRED)
 
 add_library(forge-export STATIC
     src/OBJExporter.cpp
@@ -12,6 +13,8 @@ target_include_directories(forge-export
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${TINYGLTF_INCLUDE_DIR}
 )
 
 target_link_libraries(forge-export
@@ -19,8 +22,6 @@ target_link_libraries(forge-export
         forge::build
         forge::scene
         forge_compile_options
-    PRIVATE
-        unofficial::tinygltf::tinygltf
 )
 
 target_compile_features(forge-export PUBLIC cxx_std_23)

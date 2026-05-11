@@ -1,9 +1,9 @@
 find_package(Lua REQUIRED)
 find_package(imgui    CONFIG REQUIRED)
-find_package(portable_file_dialogs CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
-find_package(Lua REQUIRED)
 find_package(imguizmo CONFIG REQUIRED)
+# portable-file-dialogs is header-only
+find_path(PFD_INCLUDE_DIR NAMES portable-file-dialogs.h REQUIRED)
 
 add_executable(forge-editor
     main.cpp
@@ -14,7 +14,7 @@ add_executable(forge-editor
     MaterialEditor.cpp
 )
 
-target_include_directories(forge-editor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${LUA_INCLUDE_DIR})
+target_include_directories(forge-editor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${LUA_INCLUDE_DIR} ${PFD_INCLUDE_DIR})
 
 target_link_libraries(forge-editor
     PRIVATE
@@ -23,7 +23,6 @@ target_link_libraries(forge-editor
         forge::runtime
         imgui::imgui
         imguizmo::imguizmo
-        portable_file_dialogs::portable_file_dialogs
         ${LUA_LIBRARIES}
         forge_compile_options
 )

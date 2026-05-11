@@ -2,7 +2,7 @@ find_package(SDL3   CONFIG REQUIRED)
 find_package(GLEW   REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(Stb       REQUIRED)
-find_package(tinygltf  CONFIG REQUIRED)
+# tinygltf is header-only, included via Stb path or vcpkg include dir
 
 add_library(forge-gfx STATIC
     src/Camera.cpp
