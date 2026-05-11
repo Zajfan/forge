@@ -43,6 +43,11 @@ struct RenderFrame {
     // Fog (exponential; density=0 disables)
     glm::vec3 fogColor   = { 0.5f, 0.5f, 0.5f };
     float     fogDensity = 0.f;
+
+    // Shadows
+    bool      shadowsEnabled  = false;
+    glm::mat4 lightSpaceMatrix = glm::mat4(1.f);
+    int       shadowMapUnit    = 1;   ///< GL texture unit where shadow map is bound
 };
 
 // ─── DrawCall ────────────────────────────────────────────────────────────────

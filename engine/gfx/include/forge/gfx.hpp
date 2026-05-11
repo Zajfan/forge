@@ -22,3 +22,4 @@
 #include "forge/gfx/TextureCache.hpp"
 #include "forge/gfx/SkyboxRenderer.hpp"
 #include "forge/gfx/OrthoCamera.hpp"
+#include "forge/gfx/ShadowMap.hpp"

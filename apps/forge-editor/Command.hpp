@@ -417,3 +417,48 @@ struct SnapToGridCommand final : Command {
         return std::format("Snap {} entities to grid ({})", snaps.size(), gridSize);
     }
 };
+
+// ─── Batch move (multi-selection) ────────────────────────────────────────────
+
+struct BatchMoveCommand final : Command {
+    struct Entry { scene::EntityId id; glm::dvec3 delta; };
+    std::vector<Entry> entries;
+
+    void execute(scene::Scene& s) override { apply(s,  1.0); }
+    void undo   (scene::Scene& s) override { apply(s, -1.0); }
+    std::string describe() const override {
+        return std::format("Move {} entities", entries.size());
+    }
+
+private:
+    void apply(scene::Scene& s, double sign) {
+        for (const auto& e : entries)
+            if (auto* ent = s.getEntity(e.id))
+                std::visit([&](auto& x){ x.transform.translation += sign * e.delta; }, *ent);
+    }
+};
+
+// ─── Duplicate selection ─────────────────────────────────────────────────────
+
+struct DuplicateEntitiesCommand final : Command {
+    std::vector<scene::BrushEntity> originals;       // what to copy
+    std::vector<scene::EntityId>    cloneIds;         // IDs of clones (assigned on execute)
+    glm::dvec3                      offset = {32,0,32}; // placement offset
+
+    void execute(scene::Scene& s) override {
+        cloneIds.clear();
+        for (auto& orig : originals) {
+            scene::BrushEntity clone = orig;
+            clone.name += "_copy";
+            clone.transform.translation += offset;
+            cloneIds.push_back(s.addEntity(std::move(clone)));
+        }
+    }
+    void undo(scene::Scene& s) override {
+        for (auto id : cloneIds) s.removeEntity(id);
+        cloneIds.clear();
+    }
+    std::string describe() const override {
+        return std::format("Duplicate {} entities", originals.size());
+    }
+};

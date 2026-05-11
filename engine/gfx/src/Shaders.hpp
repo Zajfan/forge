@@ -71,6 +71,11 @@ uniform sampler2D u_albedoMap;
 uniform vec3  u_fogColor;
 uniform float u_fogDensity;  // 0 = off
 
+// Shadows
+uniform sampler2DShadow u_shadowMap;
+uniform mat4            u_lightSpaceMatrix;
+uniform bool            u_shadowsEnabled;
+
 // Blinn-Phong point-light contribution
 vec3 pointLightContrib(int i, vec3 N, vec3 V, vec3 albedo) {
     vec3  Ld   = u_plPos[i] - v_worldPos;
@@ -115,10 +120,12 @@ void main() {
     float spec    = pow(NdotH, shine) * (1.0 - u_roughness) * 0.3;
     float backFill = max(dot(-N, L), 0.0) * 0.05;
 
+    float shadow = computeShadow(v_worldPos, N, L);
+
     vec3 color = u_ambientColor * baseAlbedo
-               + u_sunColor * u_sunIntensity * NdotL * baseAlbedo
-               + u_sunColor * spec
-               + u_albedo * backFill;
+               + u_sunColor * u_sunIntensity * NdotL * (1.0 - shadow) * baseAlbedo
+               + u_sunColor * spec * (1.0 - shadow)
+               + baseAlbedo * backFill;
 
     // ── Point lights ──────────────────────────────────────────────────────────
     int n = min(u_numPointLights, 8);
@@ -226,6 +233,25 @@ void main() {
 }
 )glsl";
 
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shadow depth-only shaders
+// ─────────────────────────────────────────────────────────────────────────────
+inline constexpr std::string_view kShadowVert = R"glsl(
+#version 460 core
+layout(location = 0) in vec3 a_position;
+uniform mat4 u_lightMVP;
+void main() {
+    gl_Position = u_lightMVP * vec4(a_position, 1.0);
+}
+)glsl";
+
+inline constexpr std::string_view kShadowFrag = R"glsl(
+#version 460 core
+// No colour output — only writes gl_FragDepth (automatic)
+void main() {}
+)glsl";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Skybox vertex shader — fullscreen triangle, writes to far depth

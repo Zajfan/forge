@@ -35,6 +35,7 @@ public:
 
     [[nodiscard]] bool        valid()      const noexcept { return vao_ != 0; }
     [[nodiscard]] uint32_t    indexCount() const noexcept { return indexCount_; }
+    [[nodiscard]] uint32_t    vao()        const noexcept { return vao_; }
     [[nodiscard]] const std::string& materialId() const noexcept { return materialId_; }
     [[nodiscard]] const geo::AABB&   bounds()     const noexcept { return bounds_; }
 

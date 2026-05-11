@@ -64,6 +64,11 @@ void Renderer::beginFrame(const RenderFrame& frame) noexcept {
     // Texture default (off until overridden per-draw)
     shader_.setBool("u_hasTexture", false);
 
+    // Shadows
+    shader_.setBool ("u_shadowsEnabled",   frame.shadowsEnabled);
+    shader_.setMat4 ("u_lightSpaceMatrix", frame.lightSpaceMatrix);
+    shader_.setInt  ("u_shadowMap",        frame.shadowMapUnit);
+
     // Point lights
     const int nLights = static_cast<int>(
         std::min(frame.pointLights.size(), static_cast<std::size_t>(kMaxPointLights)));
@@ -113,6 +118,13 @@ void Renderer::endFrame() noexcept {
     // Reset polygon mode in case wireframe was on
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     shader_.unbind();
+}
+
+void Renderer::uploadShadowUniforms(const RenderFrame& frame) noexcept {
+    shader_.bind();
+    shader_.setBool ("u_shadowsEnabled",   frame.shadowsEnabled);
+    shader_.setMat4 ("u_lightSpaceMatrix", frame.lightSpaceMatrix);
+    shader_.setInt  ("u_shadowMap",        frame.shadowMapUnit);
 }
 
 } // namespace forge::gfx

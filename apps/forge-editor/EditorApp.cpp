@@ -68,6 +68,7 @@ bool EditorApp::init() {
     if (!renderer_.init()) { std::cerr << "[error] Renderer init\n"; return false; }
     gridRenderer_.init();
     skyboxRenderer_.init();
+    shadowMap_.init(2048);
     globalRegistry().loadBuiltins();
     textureCache_.setTextureRoot(std::filesystem::current_path() / "textures");
     viewportFbo_ = gfx::Framebuffer::create(1024, 600);
@@ -183,6 +184,7 @@ void EditorApp::drawFrame() {
     if (showMaterialBrowser_) drawMaterialBrowser();
     if (showUndoHistory_)     drawUndoHistory();
     if (showEntityClasses_)   drawEntityClassBrowser();
+    if (showValidation_)      drawValidationPanel();
 }
 
 // ─── Dock layout ─────────────────────────────────────────────────────────────
@@ -234,13 +236,19 @@ void EditorApp::drawMainMenuBar() {
             commands_.redo(scene_); rebuildAllMeshes();
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Delete Selected","Del",false,selection_.hasEntity())) {
-            commands_.push(std::make_unique<DeleteEntityCommand>(selection_.entityId), scene_);
-            gpuData_.erase(selection_.entityId); selection_.clear(); faceSelection_.clear();
+        if (ImGui::MenuItem("Delete Selected","Del",false,!selection_.empty())) {
+            commands_.push(std::make_unique<DeleteEntityCommand>(selection_.primary()), scene_);
+            gpuData_.erase(selection_.primary()); selection_.clear(); faceSelection_.clear();
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("CSG Subtract (selection=cutter)",nullptr,false,selection_.hasEntity()))
+        if (ImGui::MenuItem("CSG Subtract (selection=cutter)",nullptr,false,!selection_.empty()))
             applyCSGSubtract();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Duplicate Selected", "Ctrl+D", false, !selection_.empty()))
+            duplicateSelection();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Run Validation"))
+            runValidation();
         ImGui::Separator();
         if (ImGui::MenuItem("Snap All to Grid")) {
             commands_.push(std::make_unique<SnapToGridCommand>(static_cast<double>(gridSize_)), scene_);
@@ -261,14 +269,16 @@ void EditorApp::drawMainMenuBar() {
         ImGui::MenuItem("Wireframe", "F1",    &wireframe_);
         ImGui::MenuItem("Skybox",    nullptr, &showSkybox_);
         ImGui::MenuItem("Fog",       nullptr, &showFog_);
+        ImGui::MenuItem("Shadows",   nullptr, &showShadows_);
         ImGui::Separator();
         if (ImGui::MenuItem("Frame All","F")) camera_.frameAABB(scene_.worldBounds());
         ImGui::Separator();
         ImGui::MenuItem("Material Browser", nullptr, &showMaterialBrowser_);
         ImGui::MenuItem("Undo History",     nullptr, &showUndoHistory_);
         ImGui::MenuItem("Entity Classes",   nullptr, &showEntityClasses_);
-        if (ImGui::MenuItem("Frame Selected",nullptr,false,selection_.hasEntity())) {
-            if (auto* e = scene_.getEntity(selection_.entityId))
+        ImGui::MenuItem("Validation",       nullptr, &showValidation_);
+        if (ImGui::MenuItem("Frame Selected",nullptr,false,!selection_.empty())) {
+            if (auto* e = scene_.getEntity(selection_.primary()))
                 if (auto* be = std::get_if<scene::BrushEntity>(e))
                     camera_.frameAABB(be->worldBounds());
         }
@@ -295,7 +305,7 @@ void EditorApp::drawAddPrimitivesMenu() {
         e.transform = scene::Transform::fromTranslation(glm::dvec3(camera_.target));
         auto id = scene_.addEntity(std::move(e));
         rebuildEntityMesh(id);
-        selection_.selectEntity(id);
+        selection_.set(id);
         faceSelection_.clear();
         setStatus(std::format("Added '{}'", scene::entityName(*scene_.getEntity(id))));
     };
@@ -431,6 +441,25 @@ void EditorApp::drawViewport() {
     glClearColor(0.10f,0.10f,0.12f,1.f);
     glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
+    // Shadow pass (before skybox/scene)
+    if (showShadows_ && shadowMap_.valid()) {
+        const geo::AABB sb = scene_.worldBounds();
+        const glm::mat4 lvp = shadowMap_.computeLightVP(frame.sunDirection, sb);
+        shadowMap_.setLightVP(lvp);
+        shadowMap_.beginPass();
+        for (const auto& [id, data] : gpuData_) {
+            for (const auto& sub : data.mesh.submeshes)
+                if (sub.valid())
+                    shadowMap_.submitDepth(sub.vao(), sub.indexCount(), data.model);
+        }
+        shadowMap_.endPass();
+        shadowMap_.bindDepthTexture(1);
+        frame.shadowsEnabled   = true;
+        frame.lightSpaceMatrix = lvp;
+        frame.shadowMapUnit    = 1;
+        glViewport(0, 0, (int)sz.x, (int)sz.y);
+    }
+
     // Skybox (before scene, writes at far depth)
     if (showSkybox_ && skyboxRenderer_.valid()) {
         const glm::mat4 invVP = glm::inverse(frame.proj * frame.view);
@@ -462,7 +491,7 @@ void EditorApp::drawViewport() {
 
     renderer_.beginFrame(frame);
     for (const auto& [id, data] : gpuData_) {
-        const bool sel = (selection_.entityId == id);
+        const bool sel = selection_.contains(id);
         for (const auto& sub : data.mesh.submeshes) {
             glm::vec3 col = materialColour(sub.materialId());
             if (sel) col = glm::mix(col, glm::vec3(0.3f,0.65f,1.f), 0.4f);
@@ -490,7 +519,7 @@ void EditorApp::drawViewport() {
         drawFaceOverlay(vpPos, sz, vp);
     if (vertexSelection_.valid())
         drawVertexOverlay(vpPos, sz, vp);
-    if (activeTool_ == ActiveTool::Clip && selection_.hasEntity())
+    if (activeTool_ == ActiveTool::Clip && !selection_.empty())
         drawClipPreview(vpPos, sz, vp);
 
     // ── Mouse input ───────────────────────────────────────────────────────────
@@ -613,7 +642,7 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
         switch (activeTool_) {
         case ActiveTool::Select: {
             const auto id = pickEntity(ndc, scene_, camera_, aspect);
-            if (id != scene::kInvalidEntityId) { selection_.selectEntity(id); faceSelection_.clear(); }
+            if (id != scene::kInvalidEntityId) { selection_.set(id); faceSelection_.clear(); }
             else                               { selection_.clear(); faceSelection_.clear(); }
             break;
         }
@@ -672,7 +701,7 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
         }
         default: {
             const auto id = pickEntity(ndc, scene_, camera_, aspect);
-            if (id != scene::kInvalidEntityId) selection_.selectEntity(id);
+            if (id != scene::kInvalidEntityId) selection_.set(id);
             else                               selection_.clear();
             faceSelection_.clear();
             vertexSelection_.clear();
@@ -685,21 +714,21 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
 // ─── Gizmo ───────────────────────────────────────────────────────────────────
 
 void EditorApp::drawGizmo(ImVec2 vpPos, ImVec2 vpSz) {
-    if (!selection_.hasEntity()) return;
+    if (!!selection_.empty()) return;
     if (activeTool_ == ActiveTool::Select ||
         activeTool_ == ActiveTool::FaceSelect ||
         activeTool_ == ActiveTool::FaceMove ||
         activeTool_ == ActiveTool::Clip ||
         activeTool_ == ActiveTool::Paint) return;
 
-    auto* entity = scene_.getEntity(selection_.entityId);
+    auto* entity = scene_.getEntity(selection_.primary());
     if (!entity) return;
 
     const float aspect = vpSz.x / vpSz.y;
     glm::mat4 view = camera_.viewMatrix();
     glm::mat4 proj = camera_.projMatrix(aspect);
-    glm::mat4 model = gpuData_.count(selection_.entityId)
-                    ? gpuData_[selection_.entityId].model
+    glm::mat4 model = gpuData_.count(selection_.primary())
+                    ? gpuData_[selection_.primary()].model
                     : glm::mat4(1.f);
 
     ImGuizmo::SetOrthographic(false);
@@ -721,7 +750,7 @@ void EditorApp::drawGizmo(ImVec2 vpPos, ImVec2 vpSz) {
                          op, ImGuizmo::WORLD, glm::value_ptr(model));
 
     if (ImGuizmo::IsUsing()) {
-        if (auto it = gpuData_.find(selection_.entityId); it != gpuData_.end())
+        if (auto it = gpuData_.find(selection_.primary()); it != gpuData_.end())
             it->second.model = model;
         glm::vec3 pos, scl, skw; glm::vec4 psp; glm::quat rot;
         glm::decompose(model, scl, rot, pos, skw, psp);
@@ -737,14 +766,14 @@ void EditorApp::drawGizmo(ImVec2 vpPos, ImVec2 vpSz) {
                 // Apply snap
                 if (snapEnabled_) {
                     const glm::vec3 snapped = snapVec3(newPos, gridSize_);
-                    if (auto* be2 = std::get_if<scene::BrushEntity>(scene_.getEntity(selection_.entityId)))
+                    if (auto* be2 = std::get_if<scene::BrushEntity>(scene_.getEntity(selection_.primary())))
                         be2->transform.translation = glm::dvec3(snapped);
                     newPos = snapped;
                     data.model = glm::mat4(be->transform.matrix());
                 }
                 // Re-push via undo/redo to record correctly
                 commands_.push(std::make_unique<MoveEntityCommand>(
-                    selection_.entityId,
+                    selection_.primary(),
                     glm::dvec3(gizmoDragStartPos_),
                     glm::dvec3(newPos)), scene_);
                 commands_.undo(scene_); commands_.redo(scene_);
@@ -764,7 +793,7 @@ void EditorApp::drawSceneTree() {
     ImGui::Separator();
 
     for (const auto& [id, entity] : scene_.entities) {
-        const bool sel  = (selection_.entityId == id);
+        const bool sel  = (selection_.primary() == id);
         const bool isBE = std::holds_alternative<scene::BrushEntity>(entity);
         const bool isPE = std::holds_alternative<scene::PointEntity>(entity);
         const char* ico = isBE ? "[B]" : isPE ? "[P]" : "[M]";
@@ -775,16 +804,16 @@ void EditorApp::drawSceneTree() {
             std::format("{}##{}", scene::entityName(entity), id).c_str(), fl);
         if (ImGui::IsItemClicked()) {
             if (sel) { selection_.clear(); faceSelection_.clear(); }
-            else     { selection_.selectEntity(id); faceSelection_.clear(); }
+            else     { selection_.set(id); faceSelection_.clear(); }
         }
         if (ImGui::BeginPopupContextItem()) {
-            selection_.selectEntity(id);
+            selection_.set(id);
             if (ImGui::MenuItem("Delete")) {
                 commands_.push(std::make_unique<DeleteEntityCommand>(id), scene_);
-                gpuData_.erase(id); selection_.clear(); faceSelection_.clear();
+                gpuData_.erase(id); selection_.remove(id); faceSelection_.clear();
             }
             if (isBE && ImGui::MenuItem("Save as Prefab...")) {
-                selection_.selectEntity(id);
+                selection_.set(id);
                 savePrefabFromSelection();
             }
             if (isBE && ImGui::MenuItem("Frame Camera")) {
@@ -792,7 +821,7 @@ void EditorApp::drawSceneTree() {
                 camera_.frameAABB(be->worldBounds());
             }
             if (isBE && ImGui::MenuItem("CSG Subtract (this=cutter)")) {
-                selection_.selectEntity(id);
+                selection_.set(id);
                 applyCSGSubtract();
             }
             ImGui::EndPopup();
@@ -831,16 +860,16 @@ void EditorApp::drawProperties() {
     }
 
     // ── Entity properties ─────────────────────────────────────────────────────
-    if (!selection_.hasEntity()) {
+    if (!!selection_.empty()) {
         ImGui::TextDisabled("Nothing selected.");
         ImGui::End(); return;
     }
 
-    auto* entity = scene_.getEntity(selection_.entityId);
+    auto* entity = scene_.getEntity(selection_.primary());
     if (!entity) { selection_.clear(); ImGui::End(); return; }
 
     ImGui::TextColored({0.6f,0.8f,1.f,1.f}, "Entity #%llu",
-        static_cast<unsigned long long>(selection_.entityId));
+        static_cast<unsigned long long>(selection_.primary()));
     ImGui::Separator();
 
     // Name
@@ -851,7 +880,7 @@ void EditorApp::drawProperties() {
                           ImGuiInputTextFlags_EnterReturnsTrue)) {
         if (renameBuffer_[0] && cur != renameBuffer_)
             commands_.push(std::make_unique<RenameEntityCommand>(
-                selection_.entityId, cur, renameBuffer_), scene_);
+                selection_.primary(), cur, renameBuffer_), scene_);
     }
 
     // Transform
@@ -861,7 +890,7 @@ void EditorApp::drawProperties() {
     ImGui::SetNextItemWidth(-1.f);
     if (ImGui::DragFloat3("Position", glm::value_ptr(pos), 1.f)) {
         std::visit([&](auto& e) { e.transform.translation = glm::dvec3(pos); }, *entity);
-        if (auto it = gpuData_.find(selection_.entityId); it != gpuData_.end())
+        if (auto it = gpuData_.find(selection_.primary()); it != gpuData_.end())
             it->second.model = glm::mat4(tf.matrix());
     }
 
@@ -1007,7 +1036,7 @@ void EditorApp::drawFaceProperties() {
 void EditorApp::drawClipProperties() {
     ImGui::SeparatorText("Clip Tool");
 
-    if (!selection_.hasEntity()) {
+    if (!!selection_.empty()) {
         ImGui::TextDisabled("Select an entity to clip.");
         return;
     }
@@ -1035,7 +1064,7 @@ void EditorApp::drawClipProperties() {
 // ─── Apply: clip ─────────────────────────────────────────────────────────────
 
 void EditorApp::applyClip() {
-    auto* entity = scene_.getEntity(selection_.entityId);
+    auto* entity = scene_.getEntity(selection_.primary());
     if (!entity) return;
     auto* be = std::get_if<scene::BrushEntity>(entity);
     if (!be || be->brushes.empty()) return;
@@ -1065,9 +1094,9 @@ void EditorApp::applyClip() {
 
     const std::vector<geo::Brush> origBrushes = be->brushes;
     commands_.push(std::make_unique<ClipBrushCommand>(
-        selection_.entityId, origBrushes, result), scene_);
+        selection_.primary(), origBrushes, result), scene_);
 
-    rebuildEntityMesh(selection_.entityId);
+    rebuildEntityMesh(selection_.primary());
     faceSelection_.clear();
     setStatus(std::format("Clipped → {} brush(es)", result.size()));
 }
@@ -1075,14 +1104,14 @@ void EditorApp::applyClip() {
 // ─── Apply: CSG subtract ─────────────────────────────────────────────────────
 
 void EditorApp::applyCSGSubtract() {
-    if (!selection_.hasEntity()) return;
-    auto* entity = scene_.getEntity(selection_.entityId);
+    if (!!selection_.empty()) return;
+    auto* entity = scene_.getEntity(selection_.primary());
     if (!entity) return;
     auto* cutterBE = std::get_if<scene::BrushEntity>(entity);
     if (!cutterBE) return;
 
     auto cmd = std::make_unique<CSGSubtractCommand>(
-        selection_.entityId, *cutterBE);
+        selection_.primary(), *cutterBE);
     commands_.push(std::move(cmd), scene_);
 
     selection_.clear();
@@ -1094,13 +1123,13 @@ void EditorApp::applyCSGSubtract() {
 // ─── Apply: hollow ───────────────────────────────────────────────────────────
 
 void EditorApp::applyHollow() {
-    if (!selection_.hasEntity()) return;
-    auto* entity = scene_.getEntity(selection_.entityId);
+    if (!!selection_.empty()) return;
+    auto* entity = scene_.getEntity(selection_.primary());
     if (!entity) return;
     auto* be = std::get_if<scene::BrushEntity>(entity);
     if (!be || be->brushes.size() != 1) return;
 
-    auto cmd = std::make_unique<HollowEntityCommand>(selection_.entityId, *be);
+    auto cmd = std::make_unique<HollowEntityCommand>(selection_.primary(), *be);
     cmd->wallThickness = hollowThickness_;
     commands_.push(std::move(cmd), scene_);
 
@@ -1168,6 +1197,7 @@ void EditorApp::shutdown() {
     for (auto& fbo : quadFbos_) fbo.destroy();
     textureCache_.evictAll();
     skyboxRenderer_.shutdown();
+    shadowMap_.shutdown();
     gridRenderer_.shutdown();
     renderer_.shutdown();
     ImGui_ImplOpenGL3_Shutdown();
@@ -1580,7 +1610,7 @@ void EditorApp::drawQuadViewport() {
 
         renderToFbo(quadFbos_[pane], cellSz, renderer_, gridRenderer_,
                     skyboxRenderer_, textureCache_, gpuData_,
-                    selection_.entityId, view, proj, eye,
+                    selection_.primary(), view, proj, eye,
                     wireframe_, showGrid_, showSkybox_, (pane != 0), base);
 
         // Display sub-viewport
@@ -1805,7 +1835,7 @@ void EditorApp::drawEntityClassBrowser() {
                 for (const auto& pd : def->properties)
                     pe.properties[pd.name] = scene::PropertyValue{ pd.defaultValue };
                 const auto id = scene_.addEntity(std::move(pe));
-                selection_.selectEntity(id);
+                selection_.set(id);
                 setStatus(std::format("Placed '{}'", def->classname));
             }
 
@@ -1819,8 +1849,8 @@ void EditorApp::drawEntityClassBrowser() {
 // ─── Prefab save / insert ─────────────────────────────────────────────────────
 
 void EditorApp::savePrefabFromSelection() {
-    if (!selection_.hasEntity()) return;
-    const auto* entity = scene_.getEntity(selection_.entityId);
+    if (!!selection_.empty()) return;
+    const auto* entity = scene_.getEntity(selection_.primary());
     if (!entity) return;
     const auto* be = std::get_if<scene::BrushEntity>(entity);
     if (!be || be->brushes.empty()) {
@@ -1863,8 +1893,124 @@ void EditorApp::insertPrefab() {
     auto e = instantiatePrefab(*result, spawnPos);
     const auto id = scene_.addEntity(std::move(e));
     rebuildEntityMesh(id);
-    selection_.selectEntity(id);
+    selection_.set(id);
     setStatus(std::format("Inserted prefab '{}'", result->name));
 }
 
 } // namespace forge::editor — Phase 8 panels
+
+// ─── Phase 9 additions ────────────────────────────────────────────────────────
+
+namespace forge::editor {
+
+// ─── Level validation panel ───────────────────────────────────────────────────
+
+void EditorApp::runValidation() {
+    lastValidation_ = validateScene(scene_);
+    showValidation_ = true;
+    const std::size_t errs = lastValidation_.errorCount();
+    const std::size_t warn = lastValidation_.warningCount();
+    if (errs > 0)
+        setStatus(std::format("Validation: {} errors, {} warnings.", errs, warn));
+    else if (warn > 0)
+        setStatus(std::format("Validation passed with {} warnings.", warn));
+    else
+        setStatus("Validation passed — scene is clean.");
+}
+
+void EditorApp::drawValidationPanel() {
+    ImGui::SetNextWindowSize({440.f, 360.f}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("Validation", &showValidation_);
+
+    if (ImGui::Button("Run Validation", {-1.f, 0.f})) runValidation();
+    ImGui::Separator();
+
+    if (lastValidation_.issues.empty()) {
+        ImGui::TextColored({0.3f,0.8f,0.3f,1.f}, "No issues. Scene is clean.");
+        ImGui::End();
+        return;
+    }
+
+    // Summary
+    const std::size_t errs = lastValidation_.errorCount();
+    const std::size_t warn = lastValidation_.warningCount();
+    const std::size_t info = lastValidation_.infoCount();
+
+    if (errs > 0)
+        ImGui::TextColored({1.f,0.3f,0.3f,1.f}, "[X] %zu error(s)", errs);
+    ImGui::SameLine();
+    if (warn > 0)
+        ImGui::TextColored({1.f,0.8f,0.2f,1.f}, "[!] %zu warning(s)", warn);
+    ImGui::SameLine();
+    if (info > 0)
+        ImGui::TextColored({0.6f,0.8f,1.f,1.f}, "[i] %zu info", info);
+    ImGui::Separator();
+
+    // Issue list
+    ImGui::BeginChild("##issues", {0.f, 0.f}, false);
+    for (const auto& issue : lastValidation_.issues) {
+        ImVec4 col;
+        switch (issue.level) {
+        case ValidationIssue::Level::Error:
+            col = {1.f,0.4f,0.4f,1.f}; break;
+        case ValidationIssue::Level::Warning:
+            col = {1.f,0.85f,0.3f,1.f}; break;
+        default:
+            col = {0.65f,0.85f,1.f,1.f}; break;
+        }
+
+        ImGui::PushStyleColor(ImGuiCol_Text, col);
+        ImGui::TextUnformatted(issue.levelIcon());
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+        if (!issue.entity.empty() && issue.entity != "scene") {
+            ImGui::TextDisabled("[%s]", issue.entity.c_str());
+            ImGui::SameLine();
+        }
+        ImGui::TextWrapped("%s", issue.message.c_str());
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+// ─── Duplicate selection ─────────────────────────────────────────────────────
+
+void EditorApp::duplicateSelection() {
+    if (selection_.empty()) return;
+
+    auto cmd = std::make_unique<DuplicateEntitiesCommand>();
+    cmd->offset = { 32.0, 0.0, 32.0 };
+
+    for (auto id : selection_.ids) {
+        const auto* e = scene_.getEntity(id);
+        if (!e) continue;
+        const auto* be = std::get_if<scene::BrushEntity>(e);
+        if (be) cmd->originals.push_back(*be);
+    }
+
+    if (cmd->originals.empty()) {
+        setStatus("Nothing to duplicate (select brush entities).");
+        return;
+    }
+
+    commands_.push(std::move(cmd), scene_);
+
+    // Select the new clones and rebuild their meshes
+    const auto* dupeCmd = dynamic_cast<const DuplicateEntitiesCommand*>(
+        // peek at last command — rebuild for each clone
+        nullptr); // Can't peek directly, so rebuild all
+    rebuildAllMeshes();
+
+    // Update selection to the new clones
+    const auto& all = dynamic_cast<DuplicateEntitiesCommand*>(
+        // Simpler: rebuild all and re-select anything new
+        nullptr);
+    // Rebuild and keep old selection for simplicity
+    setStatus(std::format("Duplicated {} entities.", cmd->originals.size()));
+
+    // Actually just rebuild and keep selection unchanged
+    // The duplicates appear slightly offset and can be selected separately
+}
+
+} // namespace forge::editor — Phase 9 additions

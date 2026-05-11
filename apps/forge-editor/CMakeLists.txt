@@ -7,6 +7,7 @@ add_executable(forge-editor
     EditorApp.cpp
     EntityRegistry.cpp
     PrefabSystem.cpp
+    LevelValidator.cpp
 )
 
 target_include_directories(forge-editor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

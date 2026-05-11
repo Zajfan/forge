@@ -85,3 +85,59 @@ struct FaceSelection {
 }
 
 } // namespace forge::editor
+
+// ─── MultiSelection ──────────────────────────────────────────────────────────
+
+/// Selection of zero or more entities.
+///
+/// Replaces the single-entity Selection for entity-level picking.
+/// The first entity added is the "primary" — gizmo targets it.
+///
+/// Shift+click: toggle membership.
+/// Click (no shift): replace with single entity.
+struct MultiSelection {
+    std::vector<scene::EntityId> ids;
+
+    [[nodiscard]] bool empty() const noexcept { return ids.empty(); }
+    [[nodiscard]] std::size_t size() const noexcept { return ids.size(); }
+
+    /// Primary entity (gizmo target, properties panel focus).
+    [[nodiscard]] scene::EntityId primary() const noexcept {
+        return ids.empty() ? scene::kInvalidEntityId : ids[0];
+    }
+
+    [[nodiscard]] bool contains(scene::EntityId id) const noexcept {
+        return std::ranges::find(ids, id) != ids.end();
+    }
+
+    void add(scene::EntityId id) noexcept {
+        if (!contains(id)) ids.push_back(id);
+    }
+
+    void remove(scene::EntityId id) noexcept {
+        std::erase(ids, id);
+    }
+
+    void toggle(scene::EntityId id) noexcept {
+        if (contains(id)) remove(id); else add(id);
+    }
+
+    void set(scene::EntityId id) noexcept {
+        ids.clear();
+        if (id != scene::kInvalidEntityId) ids.push_back(id);
+    }
+
+    void clear() noexcept { ids.clear(); }
+
+    /// Combined world-space AABB of all selected BrushEntities.
+    [[nodiscard]] geo::AABB combinedBounds(const scene::Scene& scene) const noexcept {
+        geo::AABB box;
+        for (auto id : ids) {
+            const auto* e = scene.getEntity(id);
+            if (!e) continue;
+            if (const auto* be = std::get_if<scene::BrushEntity>(e))
+                box.expand(be->worldBounds());
+        }
+        return box;
+    }
+};

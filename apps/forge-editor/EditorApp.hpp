@@ -6,6 +6,7 @@
 #include "GridSnap.hpp"
 #include "EntityRegistry.hpp"
 #include "PrefabSystem.hpp"
+#include "LevelValidator.hpp"
 
 #include <forge/gfx.hpp>
 #include <forge/serial.hpp>
@@ -74,6 +75,9 @@ private:
     void drawMaterialBrowser();
     void drawUndoHistory();
     void drawEntityClassBrowser();
+    void drawValidationPanel();
+    void runValidation();
+    void duplicateSelection();
     void drawFaceProperties();
     void drawClipProperties();
     void drawStatusBar();
@@ -101,13 +105,19 @@ private:
     std::array<gfx::OrthoCamera,  3> orthoCams_; // top, front, right
     int                  activeQuadPane_  = 0;  // 0=persp,1=top,2=front,3=right
 
-    // Skybox + fog
-    bool  showSkybox_   = true;
+    // Skybox, fog, shadows
+    bool  showSkybox_    = true;
     bool  showFog_       = false;
+    bool  showShadows_   = true;
+    gfx::ShadowMap shadowMap_;
+
+    // Validation
+    ValidationReport lastValidation_;
+    bool             showValidation_ = false;
 
     // ── Edit state ────────────────────────────────────────────────────────────
     scene::Scene  scene_;
-    Selection     selection_;
+    MultiSelection selection_;
     FaceSelection faceSelection_;
     CommandStack  commands_;
     ActiveTool    activeTool_  = ActiveTool::Select;

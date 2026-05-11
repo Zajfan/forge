@@ -15,6 +15,7 @@ add_library(forge-gfx STATIC
     src/SkyboxRenderer.cpp
     src/OrthoCamera.cpp
     src/stb_impl.cpp
+    src/ShadowMap.cpp
 )
 
 add_library(forge::gfx ALIAS forge-gfx)
