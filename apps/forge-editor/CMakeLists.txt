@@ -11,6 +11,7 @@ add_executable(forge-editor
     EntityRegistry.cpp
     PrefabSystem.cpp
     LevelValidator.cpp
+    MaterialEditor.cpp
 )
 
 target_include_directories(forge-editor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${LUA_INCLUDE_DIR})

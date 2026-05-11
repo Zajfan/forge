@@ -7,6 +7,7 @@
 #include "EntityRegistry.hpp"
 #include "PrefabSystem.hpp"
 #include "LevelValidator.hpp"
+#include "MaterialEditor.hpp"
 #include <forge/bsp.hpp>
 #include <forge/audio.hpp>
 #include <forge/script.hpp>
@@ -136,6 +137,11 @@ private:
 
     // Mesh asset cache
     gfx::MeshAssetCache  meshAssetCache_;
+
+    // Material editor
+    MaterialEditor       materialEditor_;
+    gfx::MaterialLibrary materialLibrary_;
+    bool                 showMaterialEditor_ = true;
 
     // Bloom
     gfx::BloomRenderer   bloomRenderer_;

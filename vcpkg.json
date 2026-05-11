@@ -41,8 +41,7 @@
       "version>=": "5.0.0"
     },
     {
-      "name": "tinygltf",
-      "version>=": "2.8.0"
+      "name": "tinygltf"
     },
     {
       "name": "stb"
@@ -60,6 +59,11 @@
       "name": "sol2"
     }
   ],
-  "builtin-baseline": "c8696863d371ab7f46e213d8f5ca923c4aef2a0",
-  "overrides": []
+  "builtin-baseline": "940f58770cee8e2011bfb4847fb2bd70057301a8",
+  "overrides": [
+    {
+      "name": "glew",
+      "version": "2.3.1"
+    }
+  ]
 }

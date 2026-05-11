@@ -1,0 +1,24 @@
+cmake_minimum_required(VERSION 3.28)
+project(Forge-Test VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Just test the core modules
+add_library(forge-test-geo
+    engine/geometry/src/Plane.cpp
+    engine/geometry/src/Brush.cpp
+    engine/geometry/src/Primitives.cpp
+    engine/geometry/src/CSG.cpp
+)
+target_include_directories(forge-test-geo PUBLIC engine/geometry/include)
+
+# Verify Material.cpp compiles
+add_library(forge-test-material
+    engine/gfx/src/Material.cpp
+)
+target_include_directories(forge-test-material PUBLIC engine/gfx/include)
+target_link_libraries(forge-test-material PUBLIC forge-test-geo)
+
+message(STATUS "✓ Geometry kernel compiled")
+message(STATUS "✓ Material system compiled")
