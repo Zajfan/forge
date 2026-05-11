@@ -1,0 +1,90 @@
+#pragma once
+
+#include <forge/scene.hpp>
+#include <string>
+#include <vector>
+#include <filesystem>
+#include <functional>
+
+// Forward-declare sol/Lua types
+namespace sol { class state; }
+
+namespace forge::script {
+
+// ─── ConsoleEntry ─────────────────────────────────────────────────────────────
+
+struct ConsoleEntry {
+    enum class Kind { Input, Output, Error };
+    Kind        kind;
+    std::string text;
+};
+
+// ─── ScriptEnv ────────────────────────────────────────────────────────────────
+
+/// A Lua 5.4 scripting environment with forge API bindings.
+///
+/// Provides:
+///   - Interactive script console (type + execute Lua in the editor)
+///   - Per-entity script execution in play mode (update() called each frame)
+///   - forge.scene API (query/mutate entities)
+///   - forge.log (print to console)
+///   - forge.input (key state in play mode)
+///
+/// Usage:
+///   env.init();
+///   env.bindScene(scene, &audioEngine);   // call once per play session
+///   env.exec("forge.log('hello')");       // interactive console
+///   env.updateEntity(entityId, code, dt); // per-entity per-frame
+///   env.shutdown();
+class ScriptEnv {
+public:
+    ScriptEnv();
+    ~ScriptEnv();
+
+    ScriptEnv(const ScriptEnv&)            = delete;
+    ScriptEnv& operator=(const ScriptEnv&) = delete;
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    [[nodiscard]] bool init() noexcept;
+    void               shutdown() noexcept;
+    [[nodiscard]] bool valid() const noexcept { return lua_ != nullptr; }
+
+    // ── API binding ───────────────────────────────────────────────────────────
+
+    /// Bind the forge scene API for the current play/edit session.
+    /// Must be called before exec() or updateEntity().
+    void bindScene(scene::Scene* scene) noexcept;
+
+    // ── Execution ─────────────────────────────────────────────────────────────
+
+    /// Execute a Lua code snippet.  Output captured in consoleLog().
+    /// @returns true on success, false on Lua error.
+    bool exec(const std::string& code) noexcept;
+
+    /// Run the per-entity update function.
+    /// Expects `code` to define a global function `update(dt)`.
+    /// Called every frame for entities that have a "script" property.
+    bool updateEntity(scene::EntityId id, const std::string& code, float dt) noexcept;
+
+    // ── Script file loading ───────────────────────────────────────────────────
+
+    [[nodiscard]] bool loadFile(const std::filesystem::path& path) noexcept;
+
+    // ── Console log ───────────────────────────────────────────────────────────
+
+    [[nodiscard]] const std::vector<ConsoleEntry>& consoleLog() const noexcept {
+        return log_;
+    }
+    void clearLog() noexcept { log_.clear(); }
+
+private:
+    std::unique_ptr<sol::state> lua_;
+    scene::Scene*               scene_ = nullptr;
+    std::vector<ConsoleEntry>   log_;
+
+    void log(ConsoleEntry::Kind kind, const std::string& text);
+    void bindForgeAPI() noexcept;
+};
+
+} // namespace forge::script

@@ -306,4 +306,86 @@ void main() {
 }
 )glsl";
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bloom post-process shaders
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Shared fullscreen-triangle vertex shader (UV in [0,1])
+inline constexpr std::string_view kFullscreenVert = R"glsl(
+#version 460 core
+out vec2 v_uv;
+void main() {
+    vec2 pos[3] = vec2[](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
+    vec2 uv[3]  = vec2[](vec2(0, 0),  vec2(2, 0),  vec2(0, 2));
+    v_uv        = uv[gl_VertexID];
+    gl_Position = vec4(pos[gl_VertexID], 0.0, 1.0);
+}
+)glsl";
+
+// Bright-pass: keep only pixels above luminance threshold
+inline constexpr std::string_view kBrightPassFrag = R"glsl(
+#version 460 core
+in  vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_scene;
+uniform float     u_threshold;   // default 0.8
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    vec3 col  = texture(u_scene, v_uv).rgb;
+    float lum = luminance(col);
+    // Soft knee: smoothstep avoids hard cutoff artefacts
+    float w = smoothstep(u_threshold * 0.9, u_threshold * 1.1, lum);
+    o_color = vec4(col * w, 1.0);
+}
+)glsl";
+
+// 9-tap separable Gaussian blur — run H then V
+inline constexpr std::string_view kGaussianBlurFrag = R"glsl(
+#version 460 core
+in  vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_tex;
+uniform vec2      u_dir;   // (1,0) or (0,1); scaled by texel size inside shader
+
+// Gaussian weights, sigma≈2, 9 taps
+const float W[5] = float[](0.2270270, 0.1945946, 0.1216216, 0.0540541, 0.0162162);
+
+void main() {
+    vec2 texel = u_dir / vec2(textureSize(u_tex, 0));
+    vec3 col   = texture(u_tex, v_uv).rgb * W[0];
+    for (int i = 1; i < 5; ++i) {
+        col += texture(u_tex, v_uv + texel * float(i)).rgb * W[i];
+        col += texture(u_tex, v_uv - texel * float(i)).rgb * W[i];
+    }
+    o_color = vec4(col, 1.0);
+}
+)glsl";
+
+// Composite: additive blend bloom on top of scene
+inline constexpr std::string_view kBloomCompositeFrag = R"glsl(
+#version 460 core
+in  vec2 v_uv;
+out vec4 o_color;
+uniform sampler2D u_scene;
+uniform sampler2D u_bloom;
+uniform float     u_intensity;  // default 1.0
+
+void main() {
+    vec3 scene = texture(u_scene, v_uv).rgb;
+    vec3 bloom = texture(u_bloom, v_uv).rgb;
+
+    // Add bloom additively, then re-apply Reinhard tonemapping
+    vec3 combined = scene + bloom * u_intensity;
+    combined = combined / (combined + vec3(1.0));
+    combined = pow(clamp(combined, 0.0, 1.0), vec3(1.0 / 2.2));
+
+    o_color = vec4(combined, 1.0);
+}
+)glsl";
+
 } // namespace forge::gfx::shaders

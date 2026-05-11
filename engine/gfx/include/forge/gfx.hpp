@@ -24,3 +24,4 @@
 #include "forge/gfx/OrthoCamera.hpp"
 #include "forge/gfx/ShadowMap.hpp"
 #include "forge/gfx/MeshAssetCache.hpp"
+#include "forge/gfx/BloomRenderer.hpp"

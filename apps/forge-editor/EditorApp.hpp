@@ -8,6 +8,10 @@
 #include "PrefabSystem.hpp"
 #include "LevelValidator.hpp"
 #include <forge/bsp.hpp>
+#include <forge/audio.hpp>
+#include <forge/script.hpp>
+#include <forge/audio.hpp>
+#include <forge/script.hpp>
 
 #include <forge/gfx.hpp>
 #include <forge/serial.hpp>
@@ -82,6 +86,12 @@ private:
     void buildBSP();
     void drawBSPPanel();
     void drawMeshEntities(const gfx::RenderFrame& frame);
+    void drawScriptConsole();
+    void drawBloomSettings();
+    void drawAudioSettings();
+    void drawScriptConsole();
+    void tickEntityScripts(float dt);
+    void triggerSpeakerEntities();
     void drawFaceProperties();
     void drawClipProperties();
     void drawStatusBar();
@@ -120,12 +130,42 @@ private:
     bool             showValidation_ = false;
 
     // BSP
-    bsp::BSPTree     bspTree_;
-    bool             bspBuilt_    = false;
-    bool             showBSPStats_= false;
+    bsp::BSPTree        bspTree_;
+    bool                bspBuilt_     = false;
+    bool                showBSPStats_ = false;
 
     // Mesh asset cache
-    gfx::MeshAssetCache meshAssetCache_;
+    gfx::MeshAssetCache  meshAssetCache_;
+
+    // Bloom
+    gfx::BloomRenderer   bloomRenderer_;
+    bool                 showBloom_        = true;
+    float                bloomThreshold_   = 0.80f;
+    float                bloomIntensity_   = 1.00f;
+
+    // Audio (active during play mode)
+    audio::AudioEngine   audioEngine_;
+    bool                 audioInitialised_ = false;
+
+    // Scripting
+    script::ScriptEnv    scriptEnv_;
+    bool                 showScriptConsole_ = false;
+    char                 scriptInputBuf_[1024] = {};
+
+    // Bloom
+    gfx::BloomRenderer  bloomRenderer_;
+    bool                bloomEnabled_ = false;
+    bool                showBloomSettings_ = false;
+
+    // Audio
+    audio::AudioEngine  audioEngine_;
+    bool                showAudioSettings_ = false;
+    float               masterVolume_      = 0.8f;
+
+    // Scripting
+    script::ScriptEnv   scriptEnv_;
+    bool                showScriptConsole_ = false;
+    char                scriptInput_[512]  = {};
 
     // ── Edit state ────────────────────────────────────────────────────────────
     scene::Scene  scene_;

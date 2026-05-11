@@ -72,6 +72,12 @@ bool EditorApp::init() {
     gridRenderer_.init();
     skyboxRenderer_.init();
     shadowMap_.init(2048);
+    bloomRenderer_.init();
+    audioEngine_.init();
+    audioEngine_.setSoundRoot(std::filesystem::current_path() / "sounds");
+    audioEngine_.setMasterVolume(masterVolume_);
+    scriptEnv_.init();
+    scriptEnv_.bindScene(&scene_);
     globalRegistry().loadBuiltins();
     textureCache_.setTextureRoot(std::filesystem::current_path() / "textures");
     meshAssetCache_.setAssetRoot(std::filesystem::current_path());
@@ -190,6 +196,10 @@ void EditorApp::drawFrame() {
     if (showEntityClasses_)   drawEntityClassBrowser();
     if (showValidation_)      drawValidationPanel();
     if (showBSPStats_)        drawBSPPanel();
+    if (showScriptConsole_)   drawScriptConsole();
+    if (showBloomSettings_)   drawBloomSettings();
+    if (showAudioSettings_)   drawAudioSettings();
+    if (showScriptConsole_)   drawScriptConsole();
 }
 
 // ─── Dock layout ─────────────────────────────────────────────────────────────
@@ -275,9 +285,16 @@ void EditorApp::drawMainMenuBar() {
         ImGui::MenuItem("Skybox",    nullptr, &showSkybox_);
         ImGui::MenuItem("Fog",       nullptr, &showFog_);
         ImGui::MenuItem("Shadows",   nullptr, &showShadows_);
+        ImGui::MenuItem("Bloom",     nullptr, &showBloom_);
         ImGui::Separator();
         if (ImGui::MenuItem("Build BSP")) buildBSP();
         ImGui::MenuItem("BSP Stats",    nullptr, &showBSPStats_);
+        ImGui::Separator();
+        ImGui::MenuItem("Bloom",         nullptr, &bloomEnabled_);
+        ImGui::MenuItem("Bloom Settings",nullptr, &showBloomSettings_);
+        ImGui::Separator();
+        ImGui::MenuItem("Audio Settings",nullptr, &showAudioSettings_);
+        ImGui::MenuItem("Script Console",nullptr, &showScriptConsole_);
         ImGui::Separator();
         if (ImGui::MenuItem("Frame All","F")) camera_.frameAABB(scene_.worldBounds());
         ImGui::Separator();
@@ -285,6 +302,7 @@ void EditorApp::drawMainMenuBar() {
         ImGui::MenuItem("Undo History",     nullptr, &showUndoHistory_);
         ImGui::MenuItem("Entity Classes",   nullptr, &showEntityClasses_);
         ImGui::MenuItem("Validation",       nullptr, &showValidation_);
+        ImGui::MenuItem("Script Console",  nullptr, &showScriptConsole_);
         if (ImGui::MenuItem("Frame Selected",nullptr,false,!selection_.empty())) {
             if (auto* e = scene_.getEntity(selection_.primary()))
                 if (auto* be = std::get_if<scene::BrushEntity>(e))
@@ -514,13 +532,29 @@ void EditorApp::drawViewport() {
     if (showGrid_ && gridRenderer_.valid())
         gridRenderer_.draw(frame.view, frame.proj, camera_.nearZ, camera_.farZ);
 
+    // Bloom post-process (modifies viewportFbo_ in-place)
+    if (bloomEnabled_ && bloomRenderer_.valid())
+        bloomRenderer_.apply(viewportFbo_, (int)sz.x, (int)sz.y);
+
     viewportFbo_.unbind();
     glViewport(0, 0, window_.width(), window_.height());
 
     // ── Display FBO ───────────────────────────────────────────────────────────
+    // Update audio listener to match camera
+    if (audioEngine_.valid()) {
+        audioEngine_.setListenerTransform(camera_.position(),
+            glm::normalize(camera_.target - camera_.position()), {0.f,1.f,0.f});
+        audioEngine_.update();
+    }
+
+    // Apply bloom post-process (modifies nothing; returns composited texture)
+    const uint32_t displayTex = (showBloom_ && bloomRenderer_.valid())
+        ? bloomRenderer_.apply(viewportFbo_, (int)sz.x, (int)sz.y)
+        : viewportFbo_.colorTexture;
+
     const ImVec2 vpPos = ImGui::GetCursorScreenPos();
     ImGui::Image(
-        reinterpret_cast<ImTextureID>(static_cast<intptr_t>(viewportFbo_.colorTexture)),
+        reinterpret_cast<ImTextureID>(static_cast<intptr_t>(displayTex)),
         sz, {0.f,1.f}, {1.f,0.f});
 
     // ── ImGui overlays drawn on top of the image ──────────────────────────────
@@ -1180,7 +1214,7 @@ void EditorApp::drawStatusBar() {
 
 // ─── File I/O ─────────────────────────────────────────────────────────────────
 
-void EditorApp::newScene()  { buildDefaultScene(); }
+void EditorApp::newScene()  { buildDefaultScene(); scriptEnv_.bindScene(&scene_); }
 
 void EditorApp::exportOBJ() {
     auto sel = pfd::save_file("Export OBJ", (std::filesystem::current_path() / (scene_.name)).string(),
@@ -1210,6 +1244,9 @@ void EditorApp::shutdown() {
     for (auto& fbo : quadFbos_) fbo.destroy();
     textureCache_.evictAll();
     meshAssetCache_.evictAll();
+    bloomRenderer_.shutdown();
+    audioEngine_.shutdown();
+    scriptEnv_.shutdown();
     skyboxRenderer_.shutdown();
     shadowMap_.shutdown();
     gridRenderer_.shutdown();
@@ -1273,6 +1310,31 @@ void EditorApp::exitPlayMode() {
 }
 
 // ─── Play frame ──────────────────────────────────────────────────────────────
+
+void EditorApp::enterPlayModeAudio() {
+    if (!audioInitialised_) {
+        if (audioEngine_.init()) {
+            audioEngine_.setSoundRoot(std::filesystem::current_path() / "sounds");
+            audioInitialised_ = true;
+        }
+    }
+    // Play ambient sounds from target_speaker entities
+    for (const auto& [id, entity] : scene_.entities) {
+        const auto* pe = std::get_if<scene::PointEntity>(&entity);
+        if (!pe || pe->classname != "target_speaker") continue;
+        const auto& props = pe->properties;
+        std::string noise;
+        float vol = 1.f;
+        if (props.contains("noise")) {
+            if (const auto* s = std::get_if<std::string>(&props.at("noise"))) noise = *s;
+        }
+        if (props.contains("volume")) {
+            if (const auto* f = std::get_if<float>(&props.at("volume"))) vol = *f;
+        }
+        if (!noise.empty())
+            audioEngine_.play2D(noise, vol, true);
+    }
+}
 
 void EditorApp::runPlayFrame() {
     window_.pollEvents();
@@ -2138,3 +2200,242 @@ void EditorApp::drawMeshEntities(const gfx::RenderFrame& frame) {
 }
 
 } // namespace forge::editor — Phase 10 additions
+
+// ─── Phase 11 additions ───────────────────────────────────────────────────────
+
+namespace forge::editor {
+
+// ─── Bloom settings panel ─────────────────────────────────────────────────────
+
+void EditorApp::drawBloomSettings() {
+    ImGui::SetNextWindowSize({280.f, 180.f}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("Bloom Settings", &showBloomSettings_);
+
+    ImGui::Checkbox("Enable Bloom", &bloomEnabled_);
+    ImGui::Separator();
+
+    ImGui::BeginDisabled(!bloomEnabled_);
+    ImGui::SliderFloat("Threshold",  &bloomRenderer_.threshold, 0.f, 2.f);
+    ImGui::SliderFloat("Intensity",  &bloomRenderer_.intensity, 0.f, 4.f);
+    ImGui::SliderInt  ("Blur Passes",&bloomRenderer_.passes,    1, 8);
+    ImGui::SetItemTooltip("More passes = softer, wider bloom (but slower)");
+    ImGui::EndDisabled();
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Pipeline: bright-pass → %dx H/V blur → composite",
+        bloomRenderer_.passes);
+    ImGui::End();
+}
+
+// ─── Audio settings panel ─────────────────────────────────────────────────────
+
+void EditorApp::drawAudioSettings() {
+    ImGui::SetNextWindowSize({300.f, 200.f}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("Audio Settings", &showAudioSettings_);
+
+    ImGui::TextColored(
+        audioEngine_.valid() ? ImVec4{0.3f,0.9f,0.3f,1.f} : ImVec4{1.f,0.3f,0.3f,1.f},
+        audioEngine_.valid() ? "Audio: ready" : "Audio: not initialised");
+    ImGui::Separator();
+
+    if (ImGui::SliderFloat("Master Volume", &masterVolume_, 0.f, 1.f))
+        audioEngine_.setMasterVolume(masterVolume_);
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Sound root: sounds/");
+    ImGui::TextDisabled("32-slot pool, spatial 3D falloff");
+    ImGui::Separator();
+
+    // Quick test buttons
+    if (!audioEngine_.valid()) ImGui::BeginDisabled();
+    if (ImGui::Button("Test Beep (2D)")) {
+        audioEngine_.play2D("test.wav", 0.5f);
+        setStatus("Played test.wav (2D)");
+    }
+    if (!audioEngine_.valid()) ImGui::EndDisabled();
+
+    // List target_speaker entities
+    ImGui::SeparatorText("Speaker Entities");
+    for (const auto& [id, ent] : scene_.entities) {
+        const auto* pe = std::get_if<scene::PointEntity>(&ent);
+        if (!pe || pe->classname != "target_speaker") continue;
+        const auto it = pe->properties.find("noise");
+        if (it == pe->properties.end()) continue;
+        const std::string& file = std::get<std::string>(it->second);
+        ImGui::TextDisabled("[%s] %s", pe->name.c_str(), file.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(std::format("Play##sp{}", id).c_str())) {
+            audioEngine_.play3D(file, glm::vec3(pe->transform.translation));
+            setStatus(std::format("Playing '{}'", file));
+        }
+    }
+    ImGui::End();
+}
+
+// ─── Script console panel ─────────────────────────────────────────────────────
+
+void EditorApp::drawScriptConsole() {
+    ImGui::SetNextWindowSize({560.f, 360.f}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("Script Console", &showScriptConsole_);
+
+    // Toolbar
+    if (ImGui::Button("Clear")) scriptEnv_.clearLog();
+    ImGui::SameLine();
+    if (ImGui::Button("Reload Scene Binding")) scriptEnv_.bindScene(&scene_);
+    ImGui::SameLine();
+    ImGui::TextDisabled("Lua 5.4  |  forge.* API  |  Enter=exec");
+    ImGui::Separator();
+
+    // Log area
+    ImGui::BeginChild("##log", {0.f, -ImGui::GetFrameHeightWithSpacing() - 4.f},
+                       false, ImGuiWindowFlags_HorizontalScrollbar);
+
+    for (const auto& entry : scriptEnv_.consoleLog()) {
+        ImVec4 col;
+        const char* prefix = "";
+        switch (entry.kind) {
+        case script::ConsoleEntry::Kind::Input:
+            col = {0.7f, 0.9f, 1.f, 1.f};  prefix = ""; break;
+        case script::ConsoleEntry::Kind::Output:
+            col = {0.9f, 0.9f, 0.9f, 1.f}; prefix = ""; break;
+        case script::ConsoleEntry::Kind::Error:
+            col = {1.f, 0.4f, 0.4f, 1.f};  prefix = ""; break;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, col);
+        ImGui::TextUnformatted((std::string(prefix) + entry.text).c_str());
+        ImGui::PopStyleColor();
+    }
+
+    // Auto-scroll to bottom
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.f)
+        ImGui::SetScrollHereY(1.f);
+
+    ImGui::EndChild();
+
+    // Input line
+    ImGui::SetNextItemWidth(-60.f);
+    const bool execute =
+        ImGui::InputText("##script", scriptInput_, sizeof(scriptInput_),
+                          ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if (ImGui::Button("Run") || execute) {
+        if (scriptInput_[0]) {
+            scriptEnv_.exec(scriptInput_);
+            scriptInput_[0] = '\0'; // clear after execution
+            ImGui::SetKeyboardFocusHere(-1);
+        }
+    }
+
+    ImGui::End();
+}
+
+// ─── Per-entity Lua update (play mode) ───────────────────────────────────────
+
+void EditorApp::tickEntityScripts(float dt) {
+    if (!scriptEnv_.valid()) return;
+    for (const auto& [id, entity] : scene_.entities) {
+        const auto* pe = std::get_if<scene::PointEntity>(&entity);
+        if (!pe) continue;
+        const auto it = pe->properties.find("script");
+        if (it == pe->properties.end()) continue;
+        const auto* code = std::get_if<std::string>(&it->second);
+        if (!code || code->empty()) continue;
+        scriptEnv_.updateEntity(id, *code, dt);
+    }
+}
+
+// ─── Trigger target_speaker entities near the player (play mode) ─────────────
+
+void EditorApp::triggerSpeakerEntities() {
+    if (!audioEngine_.valid()) return;
+    for (const auto& [id, entity] : scene_.entities) {
+        const auto* pe = std::get_if<scene::PointEntity>(&entity);
+        if (!pe || pe->classname != "target_speaker") continue;
+        const auto noiseIt = pe->properties.find("noise");
+        if (noiseIt == pe->properties.end()) continue;
+        const auto* file = std::get_if<std::string>(&noiseIt->second);
+        if (!file || file->empty()) continue;
+        const float vol = pe->property<float>("volume", 1.f);
+        audioEngine_.play3D(*file, glm::vec3(pe->transform.translation), vol);
+    }
+}
+
+} // namespace forge::editor — Phase 11 additions
+
+// ─── Phase 11 — Script console panel ─────────────────────────────────────────
+
+namespace forge::editor {
+
+void EditorApp::drawScriptConsole() {
+    ImGui::SetNextWindowSize({520.f, 380.f}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("Script Console", &showScriptConsole_);
+
+    // Bind scene so scripts can query it
+    scriptEnv_.bindScene(&scene_);
+
+    // ── Log output area ───────────────────────────────────────────────────────
+    const float inputHeight = ImGui::GetFrameHeightWithSpacing() + 8.f;
+    ImGui::BeginChild("##log",
+        {0.f, ImGui::GetContentRegionAvail().y - inputHeight - 4.f},
+        true, ImGuiWindowFlags_HorizontalScrollbar);
+
+    for (const auto& entry : scriptEnv_.consoleLog()) {
+        ImVec4 col;
+        switch (entry.kind) {
+        case script::ConsoleEntry::Kind::Input:
+            col = {0.6f, 0.8f, 1.f, 1.f}; break;
+        case script::ConsoleEntry::Kind::Error:
+            col = {1.f, 0.4f, 0.4f, 1.f}; break;
+        default:
+            col = {0.9f, 0.9f, 0.9f, 1.f}; break;
+        }
+        const char* prefix = (entry.kind == script::ConsoleEntry::Kind::Input) ? "> " : "  ";
+        ImGui::PushStyleColor(ImGuiCol_Text, col);
+        ImGui::TextUnformatted(prefix);
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", entry.text.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    // Auto-scroll to bottom
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+        ImGui::SetScrollHereY(1.f);
+
+    ImGui::EndChild();
+
+    // ── Input field ───────────────────────────────────────────────────────────
+    ImGui::Separator();
+    ImGui::SetNextItemWidth(-70.f);
+
+    const bool execute = ImGui::InputText("##luainput", scriptInputBuf_,
+        sizeof(scriptInputBuf_),
+        ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+
+    if ((execute || ImGui::Button("Run")) && scriptInputBuf_[0]) {
+        scriptEnv_.exec(scriptInputBuf_);
+        scriptInputBuf_[0] = '\0';
+        ImGui::SetKeyboardFocusHere(-1);
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Clear")) scriptEnv_.clearLog();
+
+    // ── Bloom tuning (bonus — shown in same window for compactness) ───────────
+    ImGui::Separator();
+    ImGui::SeparatorText("Bloom");
+    ImGui::Checkbox("Enable", &showBloom_); ImGui::SameLine();
+    ImGui::SetNextItemWidth(100.f);
+    ImGui::SliderFloat("Threshold", &bloomThreshold_, 0.f, 1.f);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(100.f);
+    ImGui::SliderFloat("Intensity", &bloomIntensity_, 0.f, 4.f);
+
+    // Sync to BloomRenderer
+    bloomRenderer_.threshold = bloomThreshold_;
+    bloomRenderer_.intensity = bloomIntensity_;
+
+    ImGui::End();
+}
+
+} // namespace forge::editor — Phase 11
