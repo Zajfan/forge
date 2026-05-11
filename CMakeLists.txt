@@ -44,7 +44,10 @@ endif()
 
 # ── Dependencies (via vcpkg) ──────────────────────────────────────────────────
 find_package(glm     CONFIG REQUIRED)
-find_package(Catch2  3      CONFIG REQUIRED)
+
+if(FORGE_BUILD_TESTS)
+    find_package(Catch2  3  CONFIG REQUIRED)
+endif()
 
 # ── Subdirectories ────────────────────────────────────────────────────────────
 add_subdirectory(engine/geometry)
