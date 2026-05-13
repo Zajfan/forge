@@ -295,7 +295,7 @@ void PhysicsWorld::step(float dt) noexcept {
                 bp.y >= tmin.y && bp.y <= tmax.y &&
                 bp.z >= tmin.z && bp.z <= tmax.z) {
                 occupied = true;
-                if (!trigger.wasOccupied && trigger.onEnter)
+                if (trigger.onEnter)
                     trigger.onEnter(scene::kInvalidEntityId);
                 break;
             }

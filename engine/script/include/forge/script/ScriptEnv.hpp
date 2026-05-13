@@ -70,6 +70,14 @@ public:
     /// Call during play mode init after GameRuntime::init().
     void bindPhysicsCallbacks(PhysicsCallbacks cbs) noexcept;
 
+    struct InputCallbacks {
+        std::function<bool(const std::string& key)> keyDown;
+        std::function<bool(const std::string& key)> keyPressed;
+    };
+
+    /// Wire up the input Lua API using pre-bound callbacks.
+    void bindInputCallbacks(InputCallbacks cbs) noexcept;
+
     // ── Execution ────────────────────────────────────────────────────────────────
 
     /// Execute a Lua code snippet.  Output captured in consoleLog().
@@ -88,10 +96,25 @@ public:
     /// Call once when entering play mode.
     void fireOnStart() noexcept;
 
+    struct EventArgs {
+        scene::EntityId source = scene::kInvalidEntityId;
+        scene::EntityId other  = scene::kInvalidEntityId;
+        std::string     classname;
+        std::string     target;
+        std::string     message;
+        float           delay = 0.f;
+        float           wait  = 0.f;
+        glm::vec3       position{};
+        bool            hasPosition = false;
+    };
+
     /// Fire a named global event function (e.g. on_collision, on_trigger).
     /// Calls matching function in each scripted point entity, if present.
+    void fireEvent(const std::string& name) noexcept;
+
+    /// Fire a named global event function with payload args table.
     void fireEvent(const std::string& name,
-                   scene::EntityId source = scene::kInvalidEntityId) noexcept;
+                   const EventArgs& args) noexcept;
 
     // ── Script file loading ───────────────────────────────────────────────────
 
@@ -112,6 +135,7 @@ private:
     void log(ConsoleEntry::Kind kind, const std::string& text);
     void bindForgeAPI() noexcept;
     void bindPhysicsAPI(PhysicsCallbacks cbs) noexcept;
+    void bindInputAPI(InputCallbacks cbs) noexcept;
 };
 
 } // namespace forge::script

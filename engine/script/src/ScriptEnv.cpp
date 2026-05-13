@@ -160,6 +160,11 @@ void ScriptEnv::bindForgeAPI() noexcept {
     time_tbl["dt"]      = 0.016f; // updated each frame before calling update()
     time_tbl["elapsed"] = 0.f;
 
+    // ── forge.input (default no-op until runtime wires callbacks) ──────────
+    auto input_tbl = forge.create_named("input");
+    input_tbl.set_function("key_down", [](const std::string&) { return false; });
+    input_tbl.set_function("key_pressed", [](const std::string&) { return false; });
+
     // ── Utility ──────────────────────────────────────────────────────────────
     forge.set_function("clamp", [](float v, float lo, float hi) {
         return std::clamp(v, lo, hi);
@@ -178,6 +183,10 @@ void ScriptEnv::bindScene(scene::Scene* scene) noexcept {
 
 void ScriptEnv::bindPhysicsCallbacks(PhysicsCallbacks cbs) noexcept {
     bindPhysicsAPI(std::move(cbs));
+}
+
+void ScriptEnv::bindInputCallbacks(InputCallbacks cbs) noexcept {
+    bindInputAPI(std::move(cbs));
 }
 
 // ─── Physics API ──────────────────────────────────────────────────────────────
@@ -220,6 +229,22 @@ void ScriptEnv::bindPhysicsAPI(PhysicsCallbacks cbs) noexcept {
             result["x"] = x; result["y"] = y; result["z"] = z;
             return result;
         });
+}
+
+void ScriptEnv::bindInputAPI(InputCallbacks cbs) noexcept {
+    if (!lua_) return;
+    auto& L = *lua_;
+
+    auto forge = L["forge"].get_or_create<sol::table>();
+    auto input_tbl = forge.create_named("input");
+
+    input_tbl.set_function("key_down", [cb = cbs.keyDown](const std::string& key) {
+        return cb ? cb(key) : false;
+    });
+
+    input_tbl.set_function("key_pressed", [cb = cbs.keyPressed](const std::string& key) {
+        return cb ? cb(key) : false;
+    });
 }
 
 // ─── Event hooks ─────────────────────────────────────────────────────────────
@@ -307,7 +332,11 @@ void ScriptEnv::setTime(float dt, float elapsed) noexcept {
     (*lua_)["forge"]["time"]["elapsed"] = elapsed;
 }
 
-void ScriptEnv::fireEvent(const std::string& name, scene::EntityId source) noexcept {
+void ScriptEnv::fireEvent(const std::string& name) noexcept {
+    fireEvent(name, EventArgs{});
+}
+
+void ScriptEnv::fireEvent(const std::string& name, const EventArgs& args) noexcept {
     if (!lua_ || !scene_) return;
 
     for (const auto& [id, ent] : scene_->entities) {
@@ -323,7 +352,23 @@ void ScriptEnv::fireEvent(const std::string& name, scene::EntityId source) noexc
             const sol::optional<sol::function> fn = (*lua_)[name];
             if (!fn) continue;
 
-            auto call = fn.value()(static_cast<uint64_t>(source));
+            sol::table event = lua_->create_table();
+            event["name"] = name;
+            event["source"] = static_cast<uint64_t>(args.source);
+            event["other"] = static_cast<uint64_t>(args.other);
+            event["classname"] = args.classname;
+            event["target"] = args.target;
+            event["message"] = args.message;
+            event["delay"] = args.delay;
+            event["wait"] = args.wait;
+            event["time"] = (*lua_)["forge"]["time"]["elapsed"];
+            if (args.hasPosition) {
+                event["x"] = args.position.x;
+                event["y"] = args.position.y;
+                event["z"] = args.position.z;
+            }
+
+            auto call = fn.value()(event);
             if (!call.valid()) {
                 const sol::error err = call;
                 log(ConsoleEntry::Kind::Error,

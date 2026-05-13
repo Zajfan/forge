@@ -5,6 +5,9 @@
 #include <forge/scene.hpp>
 #include <forge/gfx/Window.hpp>
 
+#include <unordered_map>
+#include <vector>
+
 namespace forge::script { class ScriptEnv; }
 
 namespace forge::runtime {
@@ -62,12 +65,41 @@ struct GameRuntime {
     [[nodiscard]] script::ScriptEnv& scriptEnv() noexcept;
 
 private:
+    struct TriggerRuntime {
+        scene::EntityId               entityId = scene::kInvalidEntityId;
+        PhysicsWorld::TriggerHandle   handle   = PhysicsWorld::kInvalidTrigger;
+        bool                          once     = false;
+        bool                          fired    = false;
+        float                         wait     = 0.f;
+        float                         delay    = 0.f;
+        float                         nextFireTime = 0.f;
+        std::string                   target;
+        std::string                   message;
+        std::string                   classname;
+        glm::vec3                     position{};
+    };
+
+    struct PendingTriggerFire {
+        scene::EntityId triggerId = scene::kInvalidEntityId;
+        float           fireAt    = 0.f;
+    };
+
+    void registerSceneTriggers() noexcept;
+    void onTriggerContact(scene::EntityId triggerId) noexcept;
+    void processPendingTriggerFires() noexcept;
+
     PhysicsWorld      physics_;
     PlayerController  player_;
     std::unique_ptr<script::ScriptEnv> scripts_;
     scene::Scene*     scene_ = nullptr;  ///< non-owning pointer to editor scene
     float             elapsedSeconds_ = 0.f;
     bool              wasOnGround_    = false;
+    gfx::InputState   prevInput_{};
+    gfx::InputState   currentInput_{};
+    bool              hasInputHistory_ = false;
+    std::vector<TriggerRuntime> triggers_;
+    std::unordered_map<scene::EntityId, std::size_t> triggerIndex_;
+    std::vector<PendingTriggerFire> pendingTriggerFires_;
 };
 
 } // namespace forge::runtime
