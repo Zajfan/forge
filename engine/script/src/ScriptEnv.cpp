@@ -378,6 +378,51 @@ void ScriptEnv::fireEvent(const std::string& name, const EventArgs& args) noexce
     }
 }
 
+void ScriptEnv::fireEntityEvent(scene::EntityId targetEntity,
+                                const std::string& name,
+                                const EventArgs& args) noexcept {
+    if (!lua_ || !scene_) return;
+
+    const scene::Entity* ent = scene_->getEntity(targetEntity);
+    if (!ent) return;
+    const auto* pe = std::get_if<scene::PointEntity>(ent);
+    if (!pe) return;
+
+    const auto it = pe->properties.find("script");
+    if (it == pe->properties.end()) return;
+    const auto* code = std::get_if<std::string>(&it->second);
+    if (!code || code->empty()) return;
+
+    auto load = lua_->safe_script(*code, sol::script_pass_on_error);
+    if (!load.valid()) return;
+
+    const sol::optional<sol::function> fn = (*lua_)[name];
+    if (!fn) return;
+
+    sol::table event = lua_->create_table();
+    event["name"] = name;
+    event["source"] = static_cast<uint64_t>(args.source);
+    event["other"] = static_cast<uint64_t>(args.other);
+    event["classname"] = args.classname;
+    event["target"] = args.target;
+    event["message"] = args.message;
+    event["delay"] = args.delay;
+    event["wait"] = args.wait;
+    event["time"] = (*lua_)["forge"]["time"]["elapsed"];
+    if (args.hasPosition) {
+        event["x"] = args.position.x;
+        event["y"] = args.position.y;
+        event["z"] = args.position.z;
+    }
+
+    auto call = fn.value()(event);
+    if (!call.valid()) {
+        const sol::error err = call;
+        log(ConsoleEntry::Kind::Error,
+            std::format("[{} entity {}] {}", name, targetEntity, err.what()));
+    }
+}
+
 bool ScriptEnv::loadFile(const std::filesystem::path& path) noexcept {
     if (!lua_) return false;
     auto result = lua_->safe_script_file(path.string(), sol::script_pass_on_error);

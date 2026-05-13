@@ -290,8 +290,35 @@ void GameRuntime::processPendingTriggerFires() noexcept {
         args.position = t.position;
         args.hasPosition = true;
         scripts_->fireEvent("on_trigger", args);
+        dispatchTargetActivations(t);
     }
     pendingTriggerFires_.erase(out, pendingTriggerFires_.end());
+}
+
+void GameRuntime::dispatchTargetActivations(const TriggerRuntime& trigger) noexcept {
+    if (!scene_ || trigger.target.empty()) return;
+
+    for (const auto& [id, ent] : scene_->entities) {
+        const auto* pe = std::get_if<scene::PointEntity>(&ent);
+        if (!pe) continue;
+
+        const std::string targetname = propAsString(*pe, "targetname");
+        if (targetname.empty() || targetname != trigger.target) continue;
+
+        script::ScriptEnv::EventArgs args;
+        args.source = trigger.entityId;
+        args.other = id;
+        args.classname = pe->classname;
+        args.target = trigger.target;
+        args.message = trigger.message;
+        args.delay = trigger.delay;
+        args.wait = trigger.wait;
+        args.position = glm::vec3(pe->transform.translation);
+        args.hasPosition = true;
+
+        scripts_->fireEntityEvent(id, "on_activate", args);
+        scripts_->fireEvent("on_target", args);
+    }
 }
 
 glm::mat4 GameRuntime::viewMatrix() const noexcept {

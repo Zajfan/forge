@@ -87,6 +87,7 @@ private:
     void registerSceneTriggers() noexcept;
     void onTriggerContact(scene::EntityId triggerId) noexcept;
     void processPendingTriggerFires() noexcept;
+    void dispatchTargetActivations(const TriggerRuntime& trigger) noexcept;
 
     PhysicsWorld      physics_;
     PlayerController  player_;

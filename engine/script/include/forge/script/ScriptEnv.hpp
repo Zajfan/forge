@@ -116,6 +116,11 @@ public:
     void fireEvent(const std::string& name,
                    const EventArgs& args) noexcept;
 
+    /// Fire a named event only for a specific scripted point entity.
+    void fireEntityEvent(scene::EntityId targetEntity,
+                         const std::string& name,
+                         const EventArgs& args) noexcept;
+
     // ── Script file loading ───────────────────────────────────────────────────
 
     [[nodiscard]] bool loadFile(const std::filesystem::path& path) noexcept;
