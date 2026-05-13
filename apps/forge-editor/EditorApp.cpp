@@ -1859,6 +1859,66 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
         return;
     }
 
+    if (activeTool_ == ActiveTool::BoxCreate) {
+        const double minSpan = snapEnabled_ ? static_cast<double>(gridSize_) : 16.0;
+
+        auto snapGroundPoint = [&](glm::dvec3 p) {
+            if (snapEnabled_) p = glm::dvec3(snapVec3(glm::vec3(p), gridSize_));
+            p.y = 0.0;
+            return p;
+        };
+
+        if (boxCreate_.draggingFootprint) {
+            if (const auto gp = pickGroundPoint()) {
+                glm::dvec3 p = snapGroundPoint(*gp);
+                p.y = boxCreate_.start.y;
+                boxCreate_.end = p;
+            }
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                boxCreate_.draggingFootprint = false;
+                boxCreate_.adjustingHeight = true;
+                boxCreate_.heightStartMouseY = ImGui::GetMousePos().y;
+                boxCreate_.height = std::max(boxCreate_.height, minSpan);
+                setStatus("Drag up/down to set box height, click to confirm.");
+            }
+            return;
+        }
+
+        if (boxCreate_.adjustingHeight) {
+            const float dy = boxCreate_.heightStartMouseY - ImGui::GetMousePos().y;
+            double h = std::max(minSpan, static_cast<double>(dy));
+            if (snapEnabled_) {
+                h = std::max(minSpan,
+                    std::round(h / static_cast<double>(gridSize_)) * static_cast<double>(gridSize_));
+            }
+            boxCreate_.height = h;
+
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !gizmoOver) {
+                addDraggedBox(boxCreate_.start, boxCreate_.end, boxCreate_.height);
+                boxCreate_.adjustingHeight = false;
+                setStatus("Box created.");
+            } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                boxCreate_.adjustingHeight = false;
+                setStatus("Box create cancelled.");
+            }
+            return;
+        }
+
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !gizmoOver) {
+            if (const auto gp = pickGroundPoint()) {
+                const glm::dvec3 p = snapGroundPoint(*gp);
+                boxCreate_.start = p;
+                boxCreate_.end = p;
+                boxCreate_.height = minSpan;
+                boxCreate_.heightStartMouseY = ImGui::GetMousePos().y;
+                boxCreate_.draggingFootprint = true;
+                boxCreate_.adjustingHeight = false;
+                setStatus("Drag to set box footprint.");
+            }
+            return;
+        }
+    }
+
     // Click handling
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !gizmoOver) {
         const ImVec2 rel = { ImGui::GetMousePos().x - vpPos.x,

@@ -129,6 +129,10 @@ struct PhysicsWorld {
 
     void removeTriggerVolume(TriggerHandle handle) noexcept;
 
+    /// Set the primary overlap probe used by trigger checks (typically player).
+    /// The probe is sampled during step() and treated as a point overlap test.
+    void setPrimaryTriggerProbe(glm::vec3 position) noexcept;
+
     // ── Native handles (needed by PlayerController .cpp only) ─────────────────
     /// Returns JPH::PhysicsSystem* — cast in callers that include Jolt headers.
     [[nodiscard]] void* nativeSystem()    const noexcept;

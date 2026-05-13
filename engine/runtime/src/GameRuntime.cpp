@@ -194,6 +194,7 @@ void GameRuntime::update(float dt, const gfx::InputState& input) noexcept {
 
     updateBrushLogic(dt);
     player_.update(dt, currentInput_, physics_);
+    physics_.setPrimaryTriggerProbe(player_.footPosition());
     physics_.step(dt);
     processPendingTriggerFires();
 

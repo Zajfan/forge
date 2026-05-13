@@ -25,6 +25,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <optional>
 
 JPH_SUPPRESS_WARNINGS
 
@@ -133,6 +134,7 @@ struct PhysicsWorld::Impl {
     // Trigger volumes
     PhysicsWorld::TriggerHandle              nextTriggerHandle = 0;
     std::unordered_map<PhysicsWorld::TriggerHandle, TriggerEntry> triggers;
+    std::optional<glm::vec3>                 primaryTriggerProbe;
 
     // Fixed-step accumulator
     float accumulator = 0.f;
@@ -299,13 +301,22 @@ void PhysicsWorld::step(float dt) noexcept {
         impl_->accumulator -= Impl::kStep;
     }
     // ── Trigger volume overlap checks ──────────────────────────────────────
-    // Simple AABB overlap check against dynamic bodies for trigger callbacks
+    // AABB overlap against player probe point and dynamic body positions.
     for (auto& [th, trigger] : impl_->triggers) {
         const glm::vec3 tmin = trigger.position - trigger.halfExt;
         const glm::vec3 tmax = trigger.position + trigger.halfExt;
 
         bool occupied = false;
+        if (impl_->primaryTriggerProbe.has_value()) {
+            const glm::vec3 p = *impl_->primaryTriggerProbe;
+            occupied =
+                p.x >= tmin.x && p.x <= tmax.x &&
+                p.y >= tmin.y && p.y <= tmax.y &&
+                p.z >= tmin.z && p.z <= tmax.z;
+        }
+
         for (const auto& [bh, entry] : impl_->dynamicBodies) {
+            if (occupied) break;
             const auto& bi = impl_->system->GetBodyInterface();
             const JPH::Vec3 pos = bi.GetPosition(entry.joltId);
             const glm::vec3 bp(pos.GetX(), pos.GetY(), pos.GetZ());
@@ -313,10 +324,12 @@ void PhysicsWorld::step(float dt) noexcept {
                 bp.y >= tmin.y && bp.y <= tmax.y &&
                 bp.z >= tmin.z && bp.z <= tmax.z) {
                 occupied = true;
-                if (trigger.onEnter)
-                    trigger.onEnter(scene::kInvalidEntityId);
-                break;
             }
+        }
+
+        if (occupied && !trigger.wasOccupied) {
+            if (trigger.onEnter)
+                trigger.onEnter(scene::kInvalidEntityId);
         }
         trigger.wasOccupied = occupied;
     }}
@@ -587,5 +600,10 @@ void PhysicsWorld::removeTriggerVolume(TriggerHandle handle) noexcept {
     bi.RemoveBody(it->second.joltId);
     bi.DestroyBody(it->second.joltId);
     impl_->triggers.erase(it);
+}
+
+void PhysicsWorld::setPrimaryTriggerProbe(glm::vec3 position) noexcept {
+    if (!impl_) return;
+    impl_->primaryTriggerProbe = position;
 }
 } // namespace forge::runtime
