@@ -20,6 +20,7 @@
 #include <chrono>
 #include <functional>
 #include <limits>
+#include <sstream>
 #include <unordered_set>
 
 namespace forge::editor {
@@ -70,6 +71,125 @@ static void drawVertexProperties_impl(
     VertexSelection& vs,
     CommandStack& cmds,
     const std::function<void(scene::EntityId)>& rebuildFn);
+
+static std::optional<glm::vec3> parseVec3Property(const std::string& text) {
+    std::stringstream ss(text);
+    float x = 0.f, y = 0.f, z = 0.f;
+    if (ss >> x >> y >> z) return glm::vec3{x, y, z};
+    return std::nullopt;
+}
+
+static scene::PropertyValue makePropertyValueFromDef(const PropertyDef& pd) {
+    switch (pd.type) {
+    case PropType::Int:
+        try { return std::stoi(pd.defaultValue); } catch (...) { return 0; }
+    case PropType::Float:
+        try { return std::stof(pd.defaultValue); } catch (...) { return 0.f; }
+    case PropType::Bool:
+        return pd.defaultValue == "1" || pd.defaultValue == "true";
+    case PropType::Vec3:
+    case PropType::Color:
+        if (const auto v = parseVec3Property(pd.defaultValue)) return *v;
+        return glm::vec3{};
+    case PropType::Choices:
+    case PropType::String:
+    default:
+        return pd.defaultValue;
+    }
+}
+
+template<typename EntityT>
+static void ensureClassDefaults(EntityT& entity, const EntityClassDef* def) {
+    if (!def) return;
+    for (const auto& pd : def->properties) {
+        if (!entity.properties.contains(pd.name))
+            entity.properties[pd.name] = makePropertyValueFromDef(pd);
+    }
+}
+
+static bool drawEntityPropertyEditor(const PropertyDef* def,
+                                     const std::string& key,
+                                     scene::PropertyValue& value) {
+    bool changed = false;
+    ImGui::PushID(key.c_str());
+
+    const PropType type = def ? def->type : PropType::String;
+    switch (type) {
+    case PropType::Bool: {
+        bool v = false;
+        if (const auto* p = std::get_if<bool>(&value)) v = *p;
+        if (ImGui::Checkbox(key.c_str(), &v)) {
+            value = v;
+            changed = true;
+        }
+        break;
+    }
+    case PropType::Int: {
+        int v = 0;
+        if (const auto* intVal = std::get_if<int>(&value)) v = *intVal;
+        else if (const auto* floatVal = std::get_if<float>(&value)) v = static_cast<int>(*floatVal);
+        if (ImGui::DragInt(key.c_str(), &v, 1.f)) {
+            value = v;
+            changed = true;
+        }
+        break;
+    }
+    case PropType::Float: {
+        float v = 0.f;
+        if (const auto* floatVal = std::get_if<float>(&value)) v = *floatVal;
+        else if (const auto* intVal = std::get_if<int>(&value)) v = static_cast<float>(*intVal);
+        if (ImGui::DragFloat(key.c_str(), &v, 0.1f)) {
+            value = v;
+            changed = true;
+        }
+        break;
+    }
+    case PropType::Vec3:
+    case PropType::Color: {
+        glm::vec3 v{};
+        if (const auto* p = std::get_if<glm::vec3>(&value)) v = *p;
+        const bool edited = (type == PropType::Color)
+            ? ImGui::ColorEdit3(key.c_str(), glm::value_ptr(v))
+            : ImGui::DragFloat3(key.c_str(), glm::value_ptr(v), 0.1f);
+        if (edited) {
+            value = v;
+            changed = true;
+        }
+        break;
+    }
+    case PropType::Choices: {
+        std::string current = std::get_if<std::string>(&value) ? *std::get_if<std::string>(&value) : std::string{};
+        if (ImGui::BeginCombo(key.c_str(), current.c_str())) {
+            for (const auto& choice : def->choices) {
+                const bool selected = (current == choice.value);
+                if (ImGui::Selectable(choice.label.c_str(), selected)) {
+                    value = choice.value;
+                    changed = true;
+                    current = choice.value;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        break;
+    }
+    case PropType::String:
+    default: {
+        std::string s = std::get_if<std::string>(&value) ? *std::get_if<std::string>(&value) : std::string{};
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), "%s", s.c_str());
+        ImGui::SetNextItemWidth(-1.f);
+        if (ImGui::InputText(key.c_str(), buf, sizeof(buf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+            value = std::string(buf);
+            changed = true;
+        }
+        break;
+    }
+    }
+
+    ImGui::PopID();
+    return changed;
+}
 
 void EditorApp::setStatus(std::string msg, float dur) {
     statusMessage_ = std::move(msg);
@@ -2261,6 +2381,33 @@ void EditorApp::drawProperties() {
         ImGui::SameLine();
         if (ImGui::Checkbox("Visible", &vis))     const_cast<scene::BrushEntity*>(be)->visible = vis;
 
+        auto* beMut = const_cast<scene::BrushEntity*>(be);
+        char classBuf[128];
+        std::snprintf(classBuf, sizeof(classBuf), "%s", be->classname.c_str());
+        ImGui::SetNextItemWidth(-1.f);
+        if (ImGui::InputText("Classname", classBuf, sizeof(classBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+            beMut->classname = classBuf;
+            ensureClassDefaults(*beMut, globalRegistry().find(beMut->classname));
+        }
+
+        if (const auto* def = globalRegistry().find(beMut->classname)) {
+            ImGui::TextDisabled("%s", def->description.c_str());
+            if (ImGui::Button("Add Missing Class Defaults"))
+                ensureClassDefaults(*beMut, def);
+
+            if (!beMut->properties.empty() || !def->properties.empty()) {
+                ImGui::SeparatorText("Properties");
+                ensureClassDefaults(*beMut, def);
+                for (auto& [k, v] : beMut->properties) {
+                    drawEntityPropertyEditor(def->findProp(k), k, v);
+                }
+            }
+        } else if (!beMut->properties.empty()) {
+            ImGui::SeparatorText("Properties");
+            for (auto& [k, v] : beMut->properties)
+                drawEntityPropertyEditor(nullptr, k, v);
+        }
+
         ImGui::SeparatorText("Operations");
 
         // CSG Subtract
@@ -2283,33 +2430,20 @@ void EditorApp::drawProperties() {
     // Point entity specifics
     if (const auto* pe = std::get_if<scene::PointEntity>(entity)) {
         ImGui::SeparatorText("Point Entity");
-        ImGui::LabelText("Class", "%s", pe->classname.c_str());
-        if (const auto* def = globalRegistry().find(pe->classname)) {
+        auto* peMut = const_cast<scene::PointEntity*>(pe);
+        ImGui::LabelText("Class", "%s", peMut->classname.c_str());
+        if (const auto* def = globalRegistry().find(peMut->classname)) {
             ImGui::TextDisabled("%s", def->description.c_str());
-            // Show any missing properties with defaults from class definition
-            if (!def->properties.empty()) {
-                ImGui::SeparatorText("Class Properties");
-                for (const auto& pd : def->properties) {
-                    const bool hasIt = pe->properties.contains(pd.name);
-                    if (!hasIt) {
-                        ImGui::PushStyleColor(ImGuiCol_Text, {0.5f,0.5f,0.5f,1.f});
-                        ImGui::LabelText(pd.name.c_str(), "%s (default)", pd.defaultValue.c_str());
-                        ImGui::PopStyleColor();
-                    }
-                }
-            }
+            if (ImGui::Button("Add Missing Class Defaults"))
+                ensureClassDefaults(*peMut, def);
+            ensureClassDefaults(*peMut, def);
         }
-        if (!pe->properties.empty()) {
+        if (!peMut->properties.empty()) {
             ImGui::SeparatorText("Properties");
-            for (const auto& [k, v] : pe->properties) {
-                std::visit([&](const auto& val) {
-                    using T = std::decay_t<decltype(val)>;
-                    if constexpr (std::is_same_v<T,std::string>) ImGui::LabelText(k.c_str(),"%s",val.c_str());
-                    else if constexpr (std::is_same_v<T,float>)  ImGui::LabelText(k.c_str(),"%.3f",val);
-                    else if constexpr (std::is_same_v<T,int>)    ImGui::LabelText(k.c_str(),"%d",val);
-                    else if constexpr (std::is_same_v<T,bool>)   ImGui::LabelText(k.c_str(),"%s",val?"true":"false");
-                }, v);
-            }
+            for (auto& [k, v] : peMut->properties)
+                drawEntityPropertyEditor(globalRegistry().find(peMut->classname)
+                    ? globalRegistry().find(peMut->classname)->findProp(k)
+                    : nullptr, k, v);
         }
     }
 
@@ -2892,6 +3026,11 @@ void EditorApp::runPlayFrame() {
         } else if (!ctrlDown) {
             crouchHeld = false;
         }
+    }
+
+    for (const auto& [id, entity] : scene_.entities) {
+        if (std::holds_alternative<scene::BrushEntity>(entity))
+            updateEntityTransform(id);
     }
 
     // Render full-screen (no FBO, no docking — covers entire window)
@@ -3661,14 +3800,26 @@ void EditorApp::drawEntityClassBrowser() {
 
             // Double-click to place at camera target
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                scene::PointEntity pe;
-                pe.name      = def->classname;
-                pe.classname = def->classname;
-                pe.transform = scene::Transform::fromTranslation(glm::dvec3(camera_.target));
-                // Populate default properties
-                for (const auto& pd : def->properties)
-                    pe.properties[pd.name] = scene::PropertyValue{ pd.defaultValue };
-                const auto id = scene_.addEntity(std::move(pe));
+                scene::EntityId id = scene::kInvalidEntityId;
+                if (def->kind == EntityKind::Brush || def->kind == EntityKind::Both) {
+                    scene::BrushEntity be;
+                    be.name = def->classname;
+                    be.classname = def->classname;
+                    be.transform = scene::Transform::fromTranslation(glm::dvec3(camera_.target));
+                    be.brushes = { geo::makeBox({-32.0, 0.0, -32.0}, {32.0, 64.0, 32.0}) };
+                    ensureClassDefaults(be, def);
+                    id = scene_.addEntity(std::move(be));
+                    entityLayers_[id] = "Default";
+                    entityGroups_[id] = "";
+                    rebuildEntityMesh(id);
+                } else {
+                    scene::PointEntity pe;
+                    pe.name      = def->classname;
+                    pe.classname = def->classname;
+                    pe.transform = scene::Transform::fromTranslation(glm::dvec3(camera_.target));
+                    ensureClassDefaults(pe, def);
+                    id = scene_.addEntity(std::move(pe));
+                }
                 selection_.set(id);
                 setStatus(std::format("Placed '{}'", def->classname));
             }

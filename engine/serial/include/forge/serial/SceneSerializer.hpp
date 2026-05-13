@@ -22,8 +22,10 @@ namespace forge::serial {
 //   }
 //
 // A brush entity:
-//   { "type":"brush", "name":"...", "solid":true, "visible":true,
+//   { "type":"brush", "name":"...", "classname":"...",
+//     "solid":true, "visible":true,
 //     "transform": { "translation":[...], "rotation":[...], "scale":[...] },
+//     "properties": { "key": {"t":"s","v":"..."}, ... },
 //     "brushes": [ { "id":"...", "faces": [ { "plane":{"normal":[...],"distance":0},
 //                    "materialId":"...", "uvOffset":[0,0], "uvScale":[1,1],
 //                    "uvRotation":0 }, ... ] }, ... ] }

@@ -164,6 +164,8 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.properties  = {
             { "height", PropType::Float, "0",  "Travel height (0 = auto).", {} },
             { "speed",  PropType::Float, "150","Movement speed.", {} },
+            { "wait",   PropType::Float, "1",  "Seconds at top before returning.", {} },
+            { "targetname", PropType::String, "", "Name for triggering.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -176,6 +178,7 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.editorColor = { 0.3f, 0.7f, 0.7f };
         e.properties  = {
             { "speed",  PropType::Float, "100", "Rotation speed (degrees/sec).", {} },
+            { "targetname", PropType::String, "", "Name for triggering/toggling.", {} },
         };
         defs_.push_back(std::move(e));
     }

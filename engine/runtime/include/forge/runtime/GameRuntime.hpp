@@ -84,10 +84,35 @@ private:
         float           fireAt    = 0.f;
     };
 
+    struct BrushLogicRuntime {
+        enum class Kind { Door, Plat, Rotating };
+        enum class MotionState { Closed, Opening, Open, Closing };
+
+        scene::EntityId entityId = scene::kInvalidEntityId;
+        Kind            kind = Kind::Door;
+        MotionState     motionState = MotionState::Closed;
+        glm::dvec3      closedTranslation{};
+        glm::dvec3      openTranslation{};
+        scene::Transform baseTransform{};
+        double          speed = 100.0;
+        double          wait  = 0.0;
+        double          lip   = 8.0;
+        double          height = 0.0;
+        double          angle  = 0.0;
+        double          closeAt = -1.0;
+        double          rotationAngle = 0.0;
+        bool            active = true;
+        std::string     targetname;
+        std::string     classname;
+    };
+
     void registerSceneTriggers() noexcept;
+    void registerBrushLogicEntities() noexcept;
     void onTriggerContact(scene::EntityId triggerId) noexcept;
     void processPendingTriggerFires() noexcept;
     void dispatchTargetActivations(const TriggerRuntime& trigger) noexcept;
+    void activateBrushLogic(scene::EntityId entityId) noexcept;
+    void updateBrushLogic(float dt) noexcept;
 
     PhysicsWorld      physics_;
     PlayerController  player_;
@@ -101,6 +126,8 @@ private:
     std::vector<TriggerRuntime> triggers_;
     std::unordered_map<scene::EntityId, std::size_t> triggerIndex_;
     std::vector<PendingTriggerFire> pendingTriggerFires_;
+    std::vector<BrushLogicRuntime> brushLogic_;
+    std::unordered_map<scene::EntityId, std::size_t> brushLogicIndex_;
 };
 
 } // namespace forge::runtime

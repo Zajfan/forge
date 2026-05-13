@@ -39,11 +39,27 @@ using PropertyValue = std::variant<
 ///   - solid=false → render-only (clip brushes, trigger volumes, etc.)
 struct BrushEntity {
     std::string              name      = "brush";
+    std::string              classname;
     Transform                transform;
     std::vector<geo::Brush>  brushes;
     bool                     solid   = true;
     bool                     visible = true;
     std::string              layer   = "default";
+    std::unordered_map<std::string, PropertyValue> properties;
+
+    template<typename T>
+    [[nodiscard]] T property(const std::string& key, T defaultValue = T{}) const noexcept {
+        if (const auto it = properties.find(key); it != properties.end()) {
+            if (const T* val = std::get_if<T>(&it->second))
+                return *val;
+        }
+        return defaultValue;
+    }
+
+    template<typename T>
+    void set(const std::string& key, T value) {
+        properties[key] = PropertyValue{ std::move(value) };
+    }
 
     /// Tight world-space AABB covering all brushes.
     [[nodiscard]] geo::AABB worldBounds() const noexcept;

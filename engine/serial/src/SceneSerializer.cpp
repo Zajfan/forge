@@ -142,9 +142,14 @@ std::string saveScene(const scene::Scene& scene,
 
                 if constexpr (std::is_same_v<T, scene::BrushEntity>) {
                     ej["type"]    = "brush";
+                    ej["classname"] = e.classname;
                     ej["solid"]   = e.solid;
                     ej["visible"] = e.visible;
                     ej["layer"]   = e.layer;
+                    json props = json::object();
+                    for (const auto& [k, v] : e.properties)
+                        props[k] = serialiseProperty(v);
+                    ej["properties"] = props;
                     json brushes = json::array();
                     for (const auto& b : e.brushes) brushes.push_back(serialiseBrush(b));
                     ej["brushes"] = brushes;
@@ -235,10 +240,14 @@ loadScene(const std::filesystem::path& path) noexcept {
                 if (type == "brush") {
                     scene::BrushEntity e;
                     e.name      = ej.value("name",    "brush");
+                    e.classname = ej.value("classname", "");
                     e.solid     = ej.value("solid",   true);
                     e.visible   = ej.value("visible", true);
                     e.layer     = ej.value("layer",   "default");
                     e.transform = readTransform(ej["transform"]);
+                    if (ej.contains("properties"))
+                        for (const auto& [pk, pv] : ej["properties"].items())
+                            e.properties[pk] = readProperty(pv);
                     for (const auto& bj : ej["brushes"])
                         e.brushes.push_back(readBrush(bj));
                     scene.addEntity(std::move(e));

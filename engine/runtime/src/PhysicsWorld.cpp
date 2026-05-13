@@ -243,6 +243,10 @@ void PhysicsWorld::addSceneGeometry(const scene::Scene& scene) noexcept {
     for (const auto& [id, entity] : scene.entities) {
         const auto* be = std::get_if<scene::BrushEntity>(&entity);
         if (!be || !be->solid) continue;
+        if (be->classname == "func_door" ||
+            be->classname == "func_plat" ||
+            be->classname == "func_rotating")
+            continue;
 
         const glm::mat4 worldMat = glm::mat4(be->transform.matrix());
 

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <iostream>
 #include <format>
 #include <optional>
@@ -41,9 +42,10 @@ bool keyStateFromName(const gfx::KeyState& keys, const std::string& rawName) {
     return false;
 }
 
-float propAsFloat(const scene::PointEntity& pe, const std::string& key, float fallback) {
-    const auto it = pe.properties.find(key);
-    if (it == pe.properties.end()) return fallback;
+template<typename EntityT>
+float propAsFloat(const EntityT& entity, const std::string& key, float fallback) {
+    const auto it = entity.properties.find(key);
+    if (it == entity.properties.end()) return fallback;
     if (const auto* f = std::get_if<float>(&it->second)) return *f;
     if (const auto* i = std::get_if<int>(&it->second)) return static_cast<float>(*i);
     if (const auto* s = std::get_if<std::string>(&it->second)) {
@@ -52,9 +54,10 @@ float propAsFloat(const scene::PointEntity& pe, const std::string& key, float fa
     return fallback;
 }
 
-std::string propAsString(const scene::PointEntity& pe, const std::string& key) {
-    const auto it = pe.properties.find(key);
-    if (it == pe.properties.end()) return {};
+template<typename EntityT>
+std::string propAsString(const EntityT& entity, const std::string& key) {
+    const auto it = entity.properties.find(key);
+    if (it == entity.properties.end()) return {};
     if (const auto* s = std::get_if<std::string>(&it->second)) return *s;
     return {};
 }
@@ -66,12 +69,21 @@ std::optional<glm::vec3> vec3FromString(const std::string& text) {
     return std::nullopt;
 }
 
-std::optional<glm::vec3> propAsVec3(const scene::PointEntity& pe, const std::string& key) {
-    const auto it = pe.properties.find(key);
-    if (it == pe.properties.end()) return std::nullopt;
+template<typename EntityT>
+std::optional<glm::vec3> propAsVec3(const EntityT& entity, const std::string& key) {
+    const auto it = entity.properties.find(key);
+    if (it == entity.properties.end()) return std::nullopt;
     if (const auto* v = std::get_if<glm::vec3>(&it->second)) return *v;
     if (const auto* s = std::get_if<std::string>(&it->second)) return vec3FromString(*s);
     return std::nullopt;
+}
+
+glm::dvec3 motionDirectionFromAngle(double angleDegrees) {
+    if (angleDegrees == -1.0) return {0.0, 1.0, 0.0};
+    if (angleDegrees == -2.0) return {0.0, -1.0, 0.0};
+
+    const double r = glm::radians(angleDegrees);
+    return glm::normalize(glm::dvec3(std::cos(r), 0.0, std::sin(r)));
 }
 
 } // namespace
@@ -137,6 +149,7 @@ bool GameRuntime::init(const scene::Scene& scene, glm::vec3 spawnPos) noexcept {
     scripts_->bindInputCallbacks(std::move(icbs));
 
     registerSceneTriggers();
+    registerBrushLogicEntities();
     scripts_->fireOnStart();
     elapsedSeconds_ = 0.f;
     wasOnGround_ = player_.onGround();
@@ -156,6 +169,8 @@ void GameRuntime::shutdown() noexcept {
     triggers_.clear();
     triggerIndex_.clear();
     pendingTriggerFires_.clear();
+    brushLogic_.clear();
+    brushLogicIndex_.clear();
 }
 
 void GameRuntime::update(float dt, const gfx::InputState& input) noexcept {
@@ -176,6 +191,7 @@ void GameRuntime::update(float dt, const gfx::InputState& input) noexcept {
     player_.update(dt, currentInput_, physics_);
     physics_.step(dt);
     processPendingTriggerFires();
+    updateBrushLogic(dt);
 
     const bool onGroundNow = player_.onGround();
     if (!wasOnGround_ && onGroundNow) {
@@ -245,6 +261,62 @@ void GameRuntime::registerSceneTriggers() noexcept {
     }
 }
 
+void GameRuntime::registerBrushLogicEntities() noexcept {
+    brushLogic_.clear();
+    brushLogicIndex_.clear();
+    if (!scene_) return;
+
+    for (const auto& [id, ent] : scene_->entities) {
+        const auto* be = std::get_if<scene::BrushEntity>(&ent);
+        if (!be || be->classname.empty()) continue;
+
+        BrushLogicRuntime logic;
+        logic.entityId = id;
+        logic.baseTransform = be->transform;
+        logic.closedTranslation = be->transform.translation;
+        logic.targetname = propAsString(*be, "targetname");
+        logic.classname = be->classname;
+
+        if (be->classname == "func_door") {
+            logic.kind = BrushLogicRuntime::Kind::Door;
+            logic.speed = std::max(1.0, static_cast<double>(propAsFloat(*be, "speed", 100.f)));
+            logic.wait  = std::max(0.0, static_cast<double>(propAsFloat(*be, "wait", 3.f)));
+            logic.lip   = static_cast<double>(propAsFloat(*be, "lip", 8.f));
+            logic.angle = static_cast<double>(propAsFloat(*be, "angle", 0.f));
+
+            const auto bounds = be->worldBounds();
+            const glm::dvec3 ext = bounds.isValid() ? bounds.extents() : glm::dvec3(128.0);
+            const glm::dvec3 dir = motionDirectionFromAngle(logic.angle);
+            double travel = glm::dot(glm::abs(dir), ext) - logic.lip;
+            if (travel <= 1.0) travel = 64.0;
+            logic.openTranslation = logic.closedTranslation + dir * travel;
+            logic.active = false;
+        } else if (be->classname == "func_plat") {
+            logic.kind = BrushLogicRuntime::Kind::Plat;
+            logic.speed = std::max(1.0, static_cast<double>(propAsFloat(*be, "speed", 150.f)));
+            logic.wait  = std::max(0.0, static_cast<double>(propAsFloat(*be, "wait", 1.f)));
+            logic.height = static_cast<double>(propAsFloat(*be, "height", 0.f));
+            if (logic.height <= 0.0) {
+                const auto bounds = be->worldBounds();
+                const glm::dvec3 ext = bounds.isValid() ? bounds.extents() : glm::dvec3(128.0);
+                logic.height = std::max(32.0, ext.y - 8.0);
+            }
+            logic.openTranslation = logic.closedTranslation + glm::dvec3(0.0, logic.height, 0.0);
+            logic.active = false;
+        } else if (be->classname == "func_rotating") {
+            logic.kind = BrushLogicRuntime::Kind::Rotating;
+            logic.speed = static_cast<double>(propAsFloat(*be, "speed", 100.f));
+            logic.openTranslation = logic.closedTranslation;
+            logic.active = true;
+        } else {
+            continue;
+        }
+
+        brushLogicIndex_[id] = brushLogic_.size();
+        brushLogic_.push_back(std::move(logic));
+    }
+}
+
 void GameRuntime::onTriggerContact(scene::EntityId triggerId) noexcept {
     const auto it = triggerIndex_.find(triggerId);
     if (it == triggerIndex_.end()) return;
@@ -299,25 +371,109 @@ void GameRuntime::dispatchTargetActivations(const TriggerRuntime& trigger) noexc
     if (!scene_ || trigger.target.empty()) return;
 
     for (const auto& [id, ent] : scene_->entities) {
-        const auto* pe = std::get_if<scene::PointEntity>(&ent);
-        if (!pe) continue;
-
-        const std::string targetname = propAsString(*pe, "targetname");
+        const std::string targetname = std::visit([](const auto& e) {
+            using T = std::decay_t<decltype(e)>;
+            if constexpr (std::is_same_v<T, scene::PointEntity> || std::is_same_v<T, scene::BrushEntity>)
+                return propAsString(e, "targetname");
+            else
+                return std::string{};
+        }, ent);
         if (targetname.empty() || targetname != trigger.target) continue;
 
         script::ScriptEnv::EventArgs args;
         args.source = trigger.entityId;
         args.other = id;
-        args.classname = pe->classname;
         args.target = trigger.target;
         args.message = trigger.message;
         args.delay = trigger.delay;
         args.wait = trigger.wait;
-        args.position = glm::vec3(pe->transform.translation);
-        args.hasPosition = true;
 
-        scripts_->fireEntityEvent(id, "on_activate", args);
-        scripts_->fireEvent("on_target", args);
+        if (const auto* pe = std::get_if<scene::PointEntity>(&ent)) {
+            args.classname = pe->classname;
+            args.position = glm::vec3(pe->transform.translation);
+            args.hasPosition = true;
+            scripts_->fireEntityEvent(id, "on_activate", args);
+            scripts_->fireEvent("on_target", args);
+        } else if (const auto* be = std::get_if<scene::BrushEntity>(&ent)) {
+            args.classname = be->classname;
+            args.position = glm::vec3(be->transform.translation);
+            args.hasPosition = true;
+            activateBrushLogic(id);
+            scripts_->fireEvent("on_target", args);
+        }
+    }
+}
+
+void GameRuntime::activateBrushLogic(scene::EntityId entityId) noexcept {
+    const auto it = brushLogicIndex_.find(entityId);
+    if (it == brushLogicIndex_.end()) return;
+    auto& logic = brushLogic_[it->second];
+
+    switch (logic.kind) {
+    case BrushLogicRuntime::Kind::Door:
+    case BrushLogicRuntime::Kind::Plat:
+        if (logic.motionState == BrushLogicRuntime::MotionState::Open ||
+            logic.motionState == BrushLogicRuntime::MotionState::Opening) {
+            logic.closeAt = elapsedSeconds_ + logic.wait;
+        } else {
+            logic.motionState = BrushLogicRuntime::MotionState::Opening;
+            logic.closeAt = -1.0;
+        }
+        break;
+    case BrushLogicRuntime::Kind::Rotating:
+        logic.active = !logic.active;
+        break;
+    }
+}
+
+void GameRuntime::updateBrushLogic(float dt) noexcept {
+    if (!scene_) return;
+
+    for (auto& logic : brushLogic_) {
+        auto* ent = scene_->getEntity(logic.entityId);
+        auto* be = ent ? std::get_if<scene::BrushEntity>(ent) : nullptr;
+        if (!be) continue;
+
+        if (logic.kind == BrushLogicRuntime::Kind::Rotating) {
+            if (!logic.active) continue;
+            logic.rotationAngle += logic.speed * dt;
+            be->transform.rotation = logic.baseTransform.rotation *
+                glm::angleAxis(glm::radians(static_cast<double>(logic.rotationAngle)), glm::dvec3(0.0, 1.0, 0.0));
+            continue;
+        }
+
+        const glm::dvec3 target =
+            (logic.motionState == BrushLogicRuntime::MotionState::Opening ||
+             logic.motionState == BrushLogicRuntime::MotionState::Open)
+                ? logic.openTranslation
+                : logic.closedTranslation;
+
+        glm::dvec3 delta = target - be->transform.translation;
+        const double dist = glm::length(delta);
+        if (dist > 1e-6) {
+            const double step = logic.speed * dt;
+            if (step >= dist) {
+                be->transform.translation = target;
+            } else {
+                be->transform.translation += (delta / dist) * step;
+            }
+        }
+
+        const double remaining = glm::length(target - be->transform.translation);
+        if (remaining <= 1e-4) {
+            if (logic.motionState == BrushLogicRuntime::MotionState::Opening) {
+                logic.motionState = BrushLogicRuntime::MotionState::Open;
+                logic.closeAt = elapsedSeconds_ + logic.wait;
+            } else if (logic.motionState == BrushLogicRuntime::MotionState::Closing) {
+                logic.motionState = BrushLogicRuntime::MotionState::Closed;
+                logic.closeAt = -1.0;
+            }
+        }
+
+        if (logic.motionState == BrushLogicRuntime::MotionState::Open &&
+            logic.closeAt >= 0.0 && elapsedSeconds_ >= logic.closeAt) {
+            logic.motionState = BrushLogicRuntime::MotionState::Closing;
+        }
     }
 }
 
