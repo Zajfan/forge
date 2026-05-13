@@ -86,6 +86,30 @@ glm::dvec3 motionDirectionFromAngle(double angleDegrees) {
     return glm::normalize(glm::dvec3(std::cos(r), 0.0, std::sin(r)));
 }
 
+// Helper: Test if a world-space point is inside a transformed convex brush
+bool pointInTransformedBrush(glm::dvec3 worldPoint,
+                              const geo::Brush& brush,
+                              const scene::Transform& transform) noexcept {
+    // Transform world point to local brush space
+    const glm::dmat4 invTransform = glm::inverse(glm::dmat4(transform.matrix()));
+    const glm::dvec4 localH = invTransform * glm::dvec4(worldPoint, 1.0);
+    const glm::dvec3 localPoint = glm::dvec3(localH) / localH.w;
+
+    // Test against all brush faces using plane equations
+    // A point is inside if it's on the back side (inside) of all planes (eval <= 0)
+    for (const auto& face : brush.faces) {
+        const double signedDist = face.plane.eval(localPoint);
+        if (signedDist > 1e-6) return false;  // point is outside (in front of) this plane
+    }
+    return true;
+}
+
+// Helper: Check if entity classname matches a filter pattern
+bool classNameMatches(const std::string& entityClass, const std::string& pattern) noexcept {
+    if (pattern.empty()) return true;  // no filter
+    return entityClass == pattern || pattern == "*";
+}
+
 } // namespace
 
 GameRuntime::GameRuntime() : scripts_(std::make_unique<script::ScriptEnv>()) {}
@@ -197,6 +221,7 @@ void GameRuntime::update(float dt, const gfx::InputState& input) noexcept {
     physics_.setPrimaryTriggerProbe(player_.footPosition());
     physics_.step(dt);
     processPendingTriggerFires();
+    updateTriggerOccupancy();  // Check for enter/exit events
 
     const bool onGroundNow = player_.onGround();
     if (!wasOnGround_ && onGroundNow) {
@@ -236,6 +261,9 @@ void GameRuntime::registerSceneTriggers() noexcept {
         float delay = 0.f;
         std::string target;
         std::string message;
+        std::string filterClass;
+        std::string filterTeam;
+        const scene::BrushEntity* brushEnt = nullptr;
 
         if (const auto* be = std::get_if<scene::BrushEntity>(&ent)) {
             classname = be->classname;
@@ -250,6 +278,9 @@ void GameRuntime::registerSceneTriggers() noexcept {
             delay = std::max(0.f, propAsFloat(*be, "delay", 0.f));
             target = propAsString(*be, "target");
             message = propAsString(*be, "message");
+            filterClass = propAsString(*be, "filter_classname");
+            filterTeam = propAsString(*be, "filter_team");
+            brushEnt = be;
         } else if (const auto* pe = std::get_if<scene::PointEntity>(&ent)) {
             // Backward compatibility for older scenes using point trigger entities.
             classname = pe->classname;
@@ -267,6 +298,8 @@ void GameRuntime::registerSceneTriggers() noexcept {
             delay = std::max(0.f, propAsFloat(*pe, "delay", 0.f));
             target = propAsString(*pe, "target");
             message = propAsString(*pe, "message");
+            filterClass = propAsString(*pe, "filter_classname");
+            filterTeam = propAsString(*pe, "filter_team");
         } else {
             continue;
         }
@@ -289,6 +322,15 @@ void GameRuntime::registerSceneTriggers() noexcept {
         t.classname = std::move(classname);
         t.position = pos;
         t.nextFireTime = 0.f;
+        t.filterClassname = std::move(filterClass);
+        t.filterTeam = std::move(filterTeam);
+
+        // Store brush geometry for precise testing if available
+        if (brushEnt) {
+            t.useGeometry = true;
+            t.triggerBrushes = brushEnt->brushes;
+            t.triggerTransform = brushEnt->transform;
+        }
 
         triggerIndex_[id] = triggers_.size();
         triggers_.push_back(std::move(t));
@@ -517,6 +559,74 @@ void GameRuntime::updateBrushLogic(float dt) noexcept {
         }
 
         physics_.setKinematicTransform(logic.bodyHandle, be->transform, dt);
+    }
+}
+
+void GameRuntime::updateTriggerOccupancy() noexcept {
+    if (!scene_) return;
+
+    const glm::dvec3 playerPos = glm::dvec3(player_.footPosition());
+
+    for (auto& trigger : triggers_) {
+        if (trigger.once && trigger.fired) continue;
+
+        // Determine if player is currently inside this trigger
+        bool playerInside = false;
+
+        if (trigger.useGeometry) {
+            // Use precise brush geometry testing
+            for (const auto& brush : trigger.triggerBrushes) {
+                if (pointInTransformedBrush(playerPos, brush, trigger.triggerTransform)) {
+                    playerInside = true;
+                    break;
+                }
+            }
+        } else {
+            // Fall back to point-in-sphere testing
+            const float defaultRadius = 64.f;
+            const float dist = glm::distance(glm::vec3(playerPos), trigger.position);
+            playerInside = dist <= defaultRadius;
+        }
+
+        // Check filter classname
+        if (!classNameMatches("player", trigger.filterClassname)) {
+            playerInside = false;
+        }
+
+        bool wasInside = trigger.occupants.count(scene::kInvalidEntityId) > 0;
+
+        if (playerInside && !wasInside) {
+            // Player entered the trigger
+            trigger.occupants.insert(scene::kInvalidEntityId);
+
+            if (trigger.delay > 0.f) {
+                pendingTriggerFires_.push_back({ trigger.entityId, elapsedSeconds_ + trigger.delay });
+            } else {
+                pendingTriggerFires_.push_back({ trigger.entityId, elapsedSeconds_ });
+            }
+
+            if (trigger.once) {
+                trigger.fired = true;
+            } else {
+                trigger.nextFireTime = elapsedSeconds_ + trigger.wait;
+            }
+        } else if (!playerInside && wasInside) {
+            // Player exited the trigger
+            trigger.occupants.erase(scene::kInvalidEntityId);
+
+            // Fire on_trigger_exit event
+            script::ScriptEnv::EventArgs args;
+            args.source = trigger.entityId;
+            args.classname = trigger.classname;
+            args.target = trigger.target;
+            args.message = trigger.message;
+            args.delay = trigger.delay;
+            args.wait = trigger.wait;
+            args.position = trigger.position;
+            args.hasPosition = true;
+            args.isExit = true;
+            scripts_->fireEvent("on_trigger_exit", args);
+        }
     }
 }
 

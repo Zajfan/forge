@@ -6,6 +6,7 @@
 #include <forge/gfx/Window.hpp>
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace forge::script { class ScriptEnv; }
@@ -77,6 +78,12 @@ private:
         std::string                   message;
         std::string                   classname;
         glm::vec3                     position{};
+        std::unordered_set<scene::EntityId> occupants;  ///< entities currently inside
+        std::string                   filterClassname;  ///< filter: only trigger on matching entities
+        std::string                   filterTeam;       ///< filter: only trigger on matching team
+        bool                          useGeometry = false;  ///< if true, use precise brush geometry test
+        std::vector<geo::Brush>       triggerBrushes;   ///< brush geometry for precise testing
+        scene::Transform              triggerTransform; ///< transform for brush geometry
     };
 
     struct PendingTriggerFire {
@@ -111,6 +118,7 @@ private:
     void registerBrushLogicEntities() noexcept;
     void onTriggerContact(scene::EntityId triggerId) noexcept;
     void processPendingTriggerFires() noexcept;
+    void updateTriggerOccupancy() noexcept;
     void dispatchTargetActivations(const TriggerRuntime& trigger) noexcept;
     void activateBrushLogic(scene::EntityId entityId) noexcept;
     void updateBrushLogic(float dt) noexcept;

@@ -106,6 +106,7 @@ public:
         float           wait  = 0.f;
         glm::vec3       position{};
         bool            hasPosition = false;
+        bool            isExit = false;  ///< true for on_trigger_exit, false for on_trigger
     };
 
     /// Fire a named global event function (e.g. on_collision, on_trigger).

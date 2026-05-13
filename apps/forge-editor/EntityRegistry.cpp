@@ -117,9 +117,11 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Fires its targets once when the player enters.";
         e.editorColor = { 0.8f, 0.3f, 0.3f };
         e.properties  = {
-            { "target",  PropType::String, "", "Targetname to activate.", {} },
-            { "delay",   PropType::Float,  "0", "Delay before firing (seconds).", {} },
-            { "message", PropType::String, "", "HUD message displayed on entry.", {} },
+            { "target",              PropType::String, "", "Targetname to activate.", {} },
+            { "delay",               PropType::Float,  "0", "Delay before firing (seconds).", {} },
+            { "message",             PropType::String, "", "HUD message displayed on entry.", {} },
+            { "filter_classname",    PropType::String, "", "Only trigger on entity classname (player).", {} },
+            { "filter_team",         PropType::String, "", "Only trigger on matching team.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -131,8 +133,10 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Fires repeatedly whenever the player is inside.";
         e.editorColor = { 0.9f, 0.4f, 0.2f };
         e.properties  = {
-            { "target",  PropType::String, "", "Targetname to activate.", {} },
-            { "wait",    PropType::Float,  "0.2", "Minimum re-fire interval.", {} },
+            { "target",              PropType::String, "", "Targetname to activate.", {} },
+            { "wait",                PropType::Float,  "0.2", "Minimum re-fire interval.", {} },
+            { "filter_classname",    PropType::String, "", "Only trigger on entity classname (player).", {} },
+            { "filter_team",         PropType::String, "", "Only trigger on matching team.", {} },
         };
         defs_.push_back(std::move(e));
     }
