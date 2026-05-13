@@ -62,6 +62,20 @@ std::string propAsString(const EntityT& entity, const std::string& key) {
     return {};
 }
 
+template<typename EntityT>
+bool propAsBool(const EntityT& entity, const std::string& key, bool fallback) {
+    const auto it = entity.properties.find(key);
+    if (it == entity.properties.end()) return fallback;
+    if (const auto* b = std::get_if<bool>(&it->second)) return *b;
+    if (const auto* i = std::get_if<int>(&it->second)) return *i != 0;
+    if (const auto* f = std::get_if<float>(&it->second)) return std::abs(*f) > 1e-6f;
+    if (const auto* s = std::get_if<std::string>(&it->second)) {
+        const std::string lower = toLower(*s);
+        return lower == "1" || lower == "true" || lower == "yes" || lower == "on";
+    }
+    return fallback;
+}
+
 std::optional<glm::vec3> vec3FromString(const std::string& text) {
     std::stringstream ss(text);
     float x = 0.f, y = 0.f, z = 0.f;
@@ -263,6 +277,7 @@ void GameRuntime::registerSceneTriggers() noexcept {
         std::string message;
         std::string filterClass;
         std::string filterTeam;
+        bool oncePerEntity = false;
         const scene::BrushEntity* brushEnt = nullptr;
 
         if (const auto* be = std::get_if<scene::BrushEntity>(&ent)) {
@@ -280,6 +295,7 @@ void GameRuntime::registerSceneTriggers() noexcept {
             message = propAsString(*be, "message");
             filterClass = propAsString(*be, "filter_classname");
             filterTeam = propAsString(*be, "filter_team");
+            oncePerEntity = propAsBool(*be, "once_per_entity", classname == "trigger_once");
             brushEnt = be;
         } else if (const auto* pe = std::get_if<scene::PointEntity>(&ent)) {
             // Backward compatibility for older scenes using point trigger entities.
@@ -300,6 +316,7 @@ void GameRuntime::registerSceneTriggers() noexcept {
             message = propAsString(*pe, "message");
             filterClass = propAsString(*pe, "filter_classname");
             filterTeam = propAsString(*pe, "filter_team");
+            oncePerEntity = propAsBool(*pe, "once_per_entity", classname == "trigger_once");
         } else {
             continue;
         }
@@ -324,6 +341,7 @@ void GameRuntime::registerSceneTriggers() noexcept {
         t.nextFireTime = 0.f;
         t.filterClassname = std::move(filterClass);
         t.filterTeam = std::move(filterTeam);
+        t.oncePerEntity = oncePerEntity || t.once;
 
         // Store brush geometry for precise testing if available
         if (brushEnt) {
@@ -398,24 +416,9 @@ void GameRuntime::registerBrushLogicEntities() noexcept {
 }
 
 void GameRuntime::onTriggerContact(scene::EntityId triggerId) noexcept {
-    const auto it = triggerIndex_.find(triggerId);
-    if (it == triggerIndex_.end()) return;
-    auto& t = triggers_[it->second];
-
-    if (t.once && t.fired) return;
-    if (elapsedSeconds_ < t.nextFireTime) return;
-
-    if (t.delay > 0.f) {
-        pendingTriggerFires_.push_back({ triggerId, elapsedSeconds_ + t.delay });
-    } else {
-        pendingTriggerFires_.push_back({ triggerId, elapsedSeconds_ });
-    }
-
-    if (t.once) {
-        t.fired = true;
-    } else {
-        t.nextFireTime = elapsedSeconds_ + t.wait;
-    }
+    (void)triggerId;
+    // Trigger fire scheduling is handled by updateTriggerOccupancy() to ensure
+    // a single consistent path with precise geometry + filtering.
 }
 
 void GameRuntime::processPendingTriggerFires() noexcept {
@@ -565,6 +568,9 @@ void GameRuntime::updateBrushLogic(float dt) noexcept {
 void GameRuntime::updateTriggerOccupancy() noexcept {
     if (!scene_) return;
 
+    constexpr scene::EntityId kPlayerOccupant = scene::kInvalidEntityId;
+    const std::string playerClassname = "player";
+    const std::string playerTeam = "player";
     const glm::dvec3 playerPos = glm::dvec3(player_.footPosition());
 
     for (auto& trigger : triggers_) {
@@ -589,30 +595,39 @@ void GameRuntime::updateTriggerOccupancy() noexcept {
         }
 
         // Check filter classname
-        if (!classNameMatches("player", trigger.filterClassname)) {
+        if (!classNameMatches(playerClassname, trigger.filterClassname) ||
+            !classNameMatches(playerTeam, trigger.filterTeam)) {
             playerInside = false;
         }
 
-        bool wasInside = trigger.occupants.count(scene::kInvalidEntityId) > 0;
+        bool wasInside = trigger.occupants.count(kPlayerOccupant) > 0;
 
         if (playerInside && !wasInside) {
             // Player entered the trigger
-            trigger.occupants.insert(scene::kInvalidEntityId);
+            trigger.occupants.insert(kPlayerOccupant);
 
-            if (trigger.delay > 0.f) {
-                pendingTriggerFires_.push_back({ trigger.entityId, elapsedSeconds_ + trigger.delay });
-            } else {
-                pendingTriggerFires_.push_back({ trigger.entityId, elapsedSeconds_ });
-            }
+            bool canFire = elapsedSeconds_ >= trigger.nextFireTime;
+            if (trigger.oncePerEntity && trigger.firedOccupants.count(kPlayerOccupant) > 0)
+                canFire = false;
 
-            if (trigger.once) {
-                trigger.fired = true;
-            } else {
-                trigger.nextFireTime = elapsedSeconds_ + trigger.wait;
+            if (canFire) {
+                if (trigger.delay > 0.f) {
+                    pendingTriggerFires_.push_back({ trigger.entityId, elapsedSeconds_ + trigger.delay });
+                } else {
+                    pendingTriggerFires_.push_back({ trigger.entityId, elapsedSeconds_ });
+                }
+
+                trigger.firedOccupants.insert(kPlayerOccupant);
+
+                if (trigger.once) {
+                    trigger.fired = true;
+                } else {
+                    trigger.nextFireTime = elapsedSeconds_ + trigger.wait;
+                }
             }
         } else if (!playerInside && wasInside) {
             // Player exited the trigger
-            trigger.occupants.erase(scene::kInvalidEntityId);
+            trigger.occupants.erase(kPlayerOccupant);
 
             // Fire on_trigger_exit event
             script::ScriptEnv::EventArgs args;

@@ -122,6 +122,7 @@ void EntityRegistry::loadBuiltins() noexcept {
             { "message",             PropType::String, "", "HUD message displayed on entry.", {} },
             { "filter_classname",    PropType::String, "", "Only trigger on entity classname (player).", {} },
             { "filter_team",         PropType::String, "", "Only trigger on matching team.", {} },
+            { "once_per_entity",     PropType::Bool,   "1", "Each entity can activate this trigger only once.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -137,6 +138,7 @@ void EntityRegistry::loadBuiltins() noexcept {
             { "wait",                PropType::Float,  "0.2", "Minimum re-fire interval.", {} },
             { "filter_classname",    PropType::String, "", "Only trigger on entity classname (player).", {} },
             { "filter_team",         PropType::String, "", "Only trigger on matching team.", {} },
+            { "once_per_entity",     PropType::Bool,   "0", "Each entity can activate this trigger only once.", {} },
         };
         defs_.push_back(std::move(e));
     }

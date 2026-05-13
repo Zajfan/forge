@@ -79,8 +79,10 @@ private:
         std::string                   classname;
         glm::vec3                     position{};
         std::unordered_set<scene::EntityId> occupants;  ///< entities currently inside
+        std::unordered_set<scene::EntityId> firedOccupants; ///< entities that have already fired this trigger
         std::string                   filterClassname;  ///< filter: only trigger on matching entities
         std::string                   filterTeam;       ///< filter: only trigger on matching team
+        bool                          oncePerEntity = false; ///< if true, each entity can fire once
         bool                          useGeometry = false;  ///< if true, use precise brush geometry test
         std::vector<geo::Brush>       triggerBrushes;   ///< brush geometry for precise testing
         scene::Transform              triggerTransform; ///< transform for brush geometry
