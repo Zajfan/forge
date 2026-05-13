@@ -94,6 +94,7 @@ private:
         glm::dvec3      closedTranslation{};
         glm::dvec3      openTranslation{};
         scene::Transform baseTransform{};
+        PhysicsWorld::KinematicHandle bodyHandle = PhysicsWorld::kInvalidKinematic;
         double          speed = 100.0;
         double          wait  = 0.0;
         double          lip   = 8.0;

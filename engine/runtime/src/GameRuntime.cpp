@@ -159,6 +159,10 @@ bool GameRuntime::init(const scene::Scene& scene, glm::vec3 spawnPos) noexcept {
 }
 
 void GameRuntime::shutdown() noexcept {
+    for (auto& logic : brushLogic_) {
+        if (logic.bodyHandle != PhysicsWorld::kInvalidKinematic)
+            physics_.removeKinematicBody(logic.bodyHandle);
+    }
     scripts_->shutdown();
     player_.shutdown();
     physics_.shutdown();
@@ -188,10 +192,10 @@ void GameRuntime::update(float dt, const gfx::InputState& input) noexcept {
     elapsedSeconds_ += dt;
     scripts_->setTime(dt, elapsedSeconds_);
 
+    updateBrushLogic(dt);
     player_.update(dt, currentInput_, physics_);
     physics_.step(dt);
     processPendingTriggerFires();
-    updateBrushLogic(dt);
 
     const bool onGroundNow = player_.onGround();
     if (!wasOnGround_ && onGroundNow) {
@@ -311,6 +315,10 @@ void GameRuntime::registerBrushLogicEntities() noexcept {
         } else {
             continue;
         }
+
+        logic.bodyHandle = physics_.addKinematicBrushEntity(*be);
+        if (logic.bodyHandle == PhysicsWorld::kInvalidKinematic)
+            continue;
 
         brushLogicIndex_[id] = brushLogic_.size();
         brushLogic_.push_back(std::move(logic));
@@ -434,11 +442,14 @@ void GameRuntime::updateBrushLogic(float dt) noexcept {
         auto* be = ent ? std::get_if<scene::BrushEntity>(ent) : nullptr;
         if (!be) continue;
 
+        if (logic.bodyHandle == PhysicsWorld::kInvalidKinematic) continue;
+
         if (logic.kind == BrushLogicRuntime::Kind::Rotating) {
             if (!logic.active) continue;
             logic.rotationAngle += logic.speed * dt;
             be->transform.rotation = logic.baseTransform.rotation *
                 glm::angleAxis(glm::radians(static_cast<double>(logic.rotationAngle)), glm::dvec3(0.0, 1.0, 0.0));
+            physics_.setKinematicTransform(logic.bodyHandle, be->transform, dt);
             continue;
         }
 
@@ -474,6 +485,8 @@ void GameRuntime::updateBrushLogic(float dt) noexcept {
             logic.closeAt >= 0.0 && elapsedSeconds_ >= logic.closeAt) {
             logic.motionState = BrushLogicRuntime::MotionState::Closing;
         }
+
+        physics_.setKinematicTransform(logic.bodyHandle, be->transform, dt);
     }
 }
 

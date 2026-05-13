@@ -23,6 +23,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <iostream>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 JPH_SUPPRESS_WARNINGS
@@ -100,6 +101,10 @@ struct DynamicBodyEntry {
     JPH::BodyID joltId;
 };
 
+struct KinematicBodyEntry {
+    JPH::BodyID joltId;
+};
+
 struct TriggerEntry {
     JPH::BodyID               joltId;
     PhysicsWorld::TriggerCallback onEnter;
@@ -120,6 +125,10 @@ struct PhysicsWorld::Impl {
     // Dynamic bodies
     PhysicsWorld::BodyHandle                 nextBodyHandle = 0;
     std::unordered_map<PhysicsWorld::BodyHandle, DynamicBodyEntry> dynamicBodies;
+
+    // Kinematic brush bodies
+    PhysicsWorld::KinematicHandle            nextKinematicHandle = 0;
+    std::unordered_map<PhysicsWorld::KinematicHandle, KinematicBodyEntry> kinematicBodies;
 
     // Trigger volumes
     PhysicsWorld::TriggerHandle              nextTriggerHandle = 0;
@@ -193,6 +202,11 @@ void PhysicsWorld::shutdown() noexcept {
             bi.DestroyBody(e.joltId);
         }
         impl_->dynamicBodies.clear();
+        for (auto& [h, e] : impl_->kinematicBodies) {
+            bi.RemoveBody(e.joltId);
+            bi.DestroyBody(e.joltId);
+        }
+        impl_->kinematicBodies.clear();
         for (auto& [h, t] : impl_->triggers) {
             bi.RemoveBody(t.joltId);
             bi.DestroyBody(t.joltId);
@@ -435,6 +449,105 @@ PhysicsWorld::snapshotDynamicBodies() const noexcept {
         });
     }
     return out;
+}
+
+// ─── Kinematic brush bodies ─────────────────────────────────────────────────
+
+static JPH::Ref<JPH::Shape>
+brushToLocalShapeScaled(const geo::Brush& brush, glm::dvec3 scale) noexcept {
+    const auto& verts = brush.vertices();
+    if (verts.size() < 4) return nullptr;
+
+    JPH::ConvexHullShapeSettings settings;
+    settings.mPoints.reserve(verts.size());
+
+    for (const auto& lv : verts) {
+        const glm::dvec3 sv = lv * scale;
+        settings.mPoints.push_back(JPH::Vec3((float)sv.x, (float)sv.y, (float)sv.z));
+    }
+    settings.mMaxConvexRadius = 0.05f;
+
+    JPH::ShapeSettings::ShapeResult result = settings.Create();
+    if (result.HasError()) {
+        const geo::AABB b = brush.bounds();
+        const glm::dvec3 mins = b.mins * scale;
+        const glm::dvec3 maxs = b.maxs * scale;
+        const glm::dvec3 halfExt = (maxs - mins) * 0.5;
+        const JPH::Vec3 jHalf(
+            (float)std::abs(halfExt.x),
+            (float)std::abs(halfExt.y),
+            (float)std::abs(halfExt.z));
+        return new JPH::BoxShape(jHalf + JPH::Vec3(0.01f, 0.01f, 0.01f));
+    }
+    return result.Get();
+}
+
+PhysicsWorld::KinematicHandle
+PhysicsWorld::addKinematicBrushEntity(const scene::BrushEntity& entity) noexcept {
+    if (!impl_ || entity.brushes.empty()) return kInvalidKinematic;
+
+    JPH::Ref<JPH::Shape> shape;
+    if (entity.brushes.size() == 1) {
+        shape = brushToLocalShapeScaled(entity.brushes.front(), entity.transform.scale);
+        if (!shape) return kInvalidKinematic;
+    } else {
+        JPH::StaticCompoundShapeSettings compound;
+        for (const auto& brush : entity.brushes) {
+            auto child = brushToLocalShapeScaled(brush, entity.transform.scale);
+            if (!child) continue;
+            compound.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), child);
+        }
+        auto result = compound.Create();
+        if (result.HasError()) return kInvalidKinematic;
+        shape = result.Get();
+    }
+
+    const auto& t = entity.transform;
+    const JPH::Quat rot((float)t.rotation.x, (float)t.rotation.y,
+                        (float)t.rotation.z, (float)t.rotation.w);
+
+    JPH::BodyCreationSettings bcs(
+        shape,
+        JPH::RVec3(t.translation.x, t.translation.y, t.translation.z),
+        rot,
+        JPH::EMotionType::Kinematic,
+        Layers::MOVING);
+
+    auto& bi = impl_->system->GetBodyInterface();
+    const JPH::BodyID joltId = bi.CreateAndAddBody(bcs, JPH::EActivation::Activate);
+    if (joltId.IsInvalid()) return kInvalidKinematic;
+
+    const KinematicHandle handle = impl_->nextKinematicHandle++;
+    impl_->kinematicBodies[handle] = { joltId };
+    return handle;
+}
+
+void PhysicsWorld::setKinematicTransform(
+    KinematicHandle handle,
+    const scene::Transform& transform,
+    float dt) noexcept {
+    if (!impl_) return;
+    const auto it = impl_->kinematicBodies.find(handle);
+    if (it == impl_->kinematicBodies.end()) return;
+
+    const JPH::Quat rot((float)transform.rotation.x, (float)transform.rotation.y,
+                        (float)transform.rotation.z, (float)transform.rotation.w);
+    const JPH::RVec3 pos(transform.translation.x, transform.translation.y, transform.translation.z);
+
+    auto& bi = impl_->system->GetBodyInterface();
+    const float stepDt = dt > 1e-6f ? dt : Impl::kStep;
+    bi.MoveKinematic(it->second.joltId, pos, rot, stepDt);
+}
+
+void PhysicsWorld::removeKinematicBody(KinematicHandle handle) noexcept {
+    if (!impl_) return;
+    const auto it = impl_->kinematicBodies.find(handle);
+    if (it == impl_->kinematicBodies.end()) return;
+
+    auto& bi = impl_->system->GetBodyInterface();
+    bi.RemoveBody(it->second.joltId);
+    bi.DestroyBody(it->second.joltId);
+    impl_->kinematicBodies.erase(it);
 }
 
 // ─── Trigger volumes ─────────────────────────────────────────────────────────────────

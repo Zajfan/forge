@@ -92,6 +92,26 @@ struct PhysicsWorld {
     };
     [[nodiscard]] std::vector<DynamicBodySnapshot> snapshotDynamicBodies() const noexcept;
 
+    // ── Kinematic brush bodies ───────────────────────────────────────────────
+
+    using KinematicHandle = uint32_t;
+    static constexpr KinematicHandle kInvalidKinematic = UINT32_MAX;
+
+    /// Add a kinematic rigid body representing a brush entity.
+    /// Brush vertices are baked in local space (including entity scale).
+    [[nodiscard]] KinematicHandle addKinematicBrushEntity(
+        const scene::BrushEntity& entity) noexcept;
+
+    /// Update kinematic body world transform.
+    /// Uses MoveKinematic internally so velocity is consistent for contacts.
+    void setKinematicTransform(
+        KinematicHandle handle,
+        const scene::Transform& transform,
+        float dt) noexcept;
+
+    /// Remove a kinematic body.
+    void removeKinematicBody(KinematicHandle handle) noexcept;
+
     // ── Trigger volumes ───────────────────────────────────────────────────────
 
     using TriggerHandle = uint32_t;
