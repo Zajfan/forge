@@ -8,6 +8,22 @@
 
 namespace forge::script {
 
+static std::string luaValueToString(const sol::object& value) {
+    switch (value.get_type()) {
+    case sol::type::string:
+        return value.as<std::string>();
+    case sol::type::number:
+        return std::format("{}", value.as<double>());
+    case sol::type::boolean:
+        return value.as<bool>() ? "true" : "false";
+    case sol::type::nil:
+    case sol::type::none:
+        return "nil";
+    default:
+        return "<object>";
+    }
+}
+
 ScriptEnv::ScriptEnv()  = default;
 ScriptEnv::~ScriptEnv() { shutdown(); }
 
@@ -55,7 +71,7 @@ void ScriptEnv::bindForgeAPI() noexcept {
         std::string line;
         for (auto v : va) {
             if (!line.empty()) line += "\t";
-            line += L.stringify(v);  // use sol stringify helper
+            line += luaValueToString(v.get<sol::object>());
         }
         log(ConsoleEntry::Kind::Output, line);
     });
@@ -176,7 +192,7 @@ bool ScriptEnv::exec(const std::string& code) noexcept {
     if (result.get_type() != sol::type::none &&
         result.get_type() != sol::type::nil) {
         const auto& val = result.get<sol::object>();
-        log(ConsoleEntry::Kind::Output, lua_->stringify(val));
+        log(ConsoleEntry::Kind::Output, luaValueToString(val));
     }
     return true;
 }

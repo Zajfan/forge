@@ -57,7 +57,7 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.editorColor = { 0.2f, 0.9f, 0.2f };
         e.properties  = {
             { "angle", PropType::Float, "0",
-              "Direction the player faces on spawn (degrees, 0=+X)." },
+              "Direction the player faces on spawn (degrees, 0=+X).", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -68,7 +68,7 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Deathmatch spawn point.";
         e.editorColor = { 0.2f, 0.8f, 0.4f };
         e.properties  = {
-            { "angle", PropType::Float, "0", "Facing direction." },
+            { "angle", PropType::Float, "0", "Facing direction.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -82,13 +82,13 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.editorColor = { 1.f, 0.9f, 0.3f };
         e.properties  = {
             { "light",   PropType::Float,  "300",
-              "Brightness (game units squared)." },
+                            "Brightness (game units squared).", {} },
             { "_color",  PropType::Color,  "1.0 0.95 0.8",
-              "Light colour as normalised RGB." },
+                            "Light colour as normalised RGB.", {} },
             { "radius",  PropType::Float,  "512",
-              "Hard attenuation radius (game units)." },
+                            "Hard attenuation radius (game units).", {} },
             { "target",  PropType::String, "",
-              "Name of entity this light aims at (spot light)." },
+                            "Name of entity this light aims at (spot light).", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -99,11 +99,11 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Cone (spot) light.";
         e.editorColor = { 1.f, 0.7f, 0.2f };
         e.properties  = {
-            { "light",   PropType::Float,  "300", "Brightness." },
-            { "_color",  PropType::Color,  "1.0 0.95 0.8", "Colour." },
-            { "radius",  PropType::Float,  "512", "Attenuation radius." },
-            { "angle",   PropType::Float,  "40",  "Cone half-angle (degrees)." },
-            { "wait",    PropType::Float,  "0.5", "Penumbra falloff exponent." },
+            { "light",   PropType::Float,  "300", "Brightness.", {} },
+            { "_color",  PropType::Color,  "1.0 0.95 0.8", "Colour.", {} },
+            { "radius",  PropType::Float,  "512", "Attenuation radius.", {} },
+            { "angle",   PropType::Float,  "40",  "Cone half-angle (degrees).", {} },
+            { "wait",    PropType::Float,  "0.5", "Penumbra falloff exponent.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -117,9 +117,9 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Fires its targets once when the player enters.";
         e.editorColor = { 0.8f, 0.3f, 0.3f };
         e.properties  = {
-            { "target",  PropType::String, "", "Targetname to activate." },
-            { "delay",   PropType::Float,  "0", "Delay before firing (seconds)." },
-            { "message", PropType::String, "", "HUD message displayed on entry." },
+            { "target",  PropType::String, "", "Targetname to activate.", {} },
+            { "delay",   PropType::Float,  "0", "Delay before firing (seconds).", {} },
+            { "message", PropType::String, "", "HUD message displayed on entry.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -131,8 +131,8 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Fires repeatedly whenever the player is inside.";
         e.editorColor = { 0.9f, 0.4f, 0.2f };
         e.properties  = {
-            { "target",  PropType::String, "", "Targetname to activate." },
-            { "wait",    PropType::Float,  "0.2", "Minimum re-fire interval." },
+            { "target",  PropType::String, "", "Targetname to activate.", {} },
+            { "wait",    PropType::Float,  "0.2", "Minimum re-fire interval.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -146,11 +146,11 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "A sliding door triggered by player proximity or target.";
         e.editorColor = { 0.4f, 0.6f, 0.9f };
         e.properties  = {
-            { "angle",   PropType::Float,  "0",   "Opening direction." },
-            { "speed",   PropType::Float,  "100", "Movement speed (units/sec)." },
-            { "wait",    PropType::Float,  "3",   "Seconds open before closing." },
-            { "lip",     PropType::Float,  "8",   "Lip remaining after opening." },
-            { "targetname", PropType::String, "", "Name for triggering." },
+            { "angle",   PropType::Float,  "0",   "Opening direction.", {} },
+            { "speed",   PropType::Float,  "100", "Movement speed (units/sec).", {} },
+            { "wait",    PropType::Float,  "3",   "Seconds open before closing.", {} },
+            { "lip",     PropType::Float,  "8",   "Lip remaining after opening.", {} },
+            { "targetname", PropType::String, "", "Name for triggering.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -162,8 +162,8 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Elevator platform.";
         e.editorColor = { 0.5f, 0.4f, 0.8f };
         e.properties  = {
-            { "height", PropType::Float, "0",  "Travel height (0 = auto)." },
-            { "speed",  PropType::Float, "150","Movement speed." },
+            { "height", PropType::Float, "0",  "Travel height (0 = auto).", {} },
+            { "speed",  PropType::Float, "150","Movement speed.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -175,7 +175,7 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Continuously rotating brush entity.";
         e.editorColor = { 0.3f, 0.7f, 0.7f };
         e.properties  = {
-            { "speed",  PropType::Float, "100", "Rotation speed (degrees/sec)." },
+            { "speed",  PropType::Float, "100", "Rotation speed (degrees/sec).", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -188,8 +188,8 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Plays a sound at its origin.";
         e.editorColor = { 0.5f, 0.8f, 0.9f };
         e.properties  = {
-            { "noise",  PropType::String, "", "Sound file path." },
-            { "volume", PropType::Float,  "1", "Playback volume (0–1)." },
+            { "noise",  PropType::String, "", "Sound file path.", {} },
+            { "volume", PropType::Float,  "1", "Playback volume (0–1).", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -202,7 +202,7 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Health pickup.";
         e.editorColor = { 0.9f, 0.2f, 0.2f };
         e.properties  = {
-            { "amount", PropType::Int, "25", "Health granted." },
+            { "amount", PropType::Int, "25", "Health granted.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -213,7 +213,7 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Armour pickup.";
         e.editorColor = { 0.6f, 0.6f, 0.9f };
         e.properties  = {
-            { "amount", PropType::Int, "50", "Armour granted." },
+            { "amount", PropType::Int, "50", "Armour granted.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -226,7 +226,7 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Generic named target / anchor point.";
         e.editorColor = { 0.5f, 0.5f, 0.5f };
         e.properties  = {
-            { "targetname", PropType::String, "", "Name used by triggers." },
+            { "targetname", PropType::String, "", "Name used by triggers.", {} },
         };
         defs_.push_back(std::move(e));
     }
@@ -237,9 +237,9 @@ void EntityRegistry::loadBuiltins() noexcept {
         e.description = "Places a static mesh asset in the world.";
         e.editorColor = { 0.7f, 0.5f, 0.9f };
         e.properties  = {
-            { "model",  PropType::String, "", "Relative path to GLTF/OBJ asset." },
-            { "skin",   PropType::Int,    "0", "Skin/material variant index." },
-            { "angle",  PropType::Float,  "0", "Yaw rotation (degrees)." },
+            { "model",  PropType::String, "", "Relative path to GLTF/OBJ asset.", {} },
+            { "skin",   PropType::Int,    "0", "Skin/material variant index.", {} },
+            { "angle",  PropType::Float,  "0", "Yaw rotation (degrees).", {} },
         };
         defs_.push_back(std::move(e));
     }

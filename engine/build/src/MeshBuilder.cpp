@@ -53,52 +53,6 @@ glm::vec2 planarUV(
     return { u, v };
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
-// Weld vertices within epsilon — returns a map from polygon-local index to
-// final deduplicated index in the output vertex list.
-static std::vector<uint32_t> weldVertices(
-    const std::vector<Vertex>& incoming,
-    std::vector<Vertex>&       outVerts,
-    float                      epsilon = 1e-4f) noexcept
-{
-    std::vector<uint32_t> indexMap(incoming.size());
-
-    for (std::size_t i = 0; i < incoming.size(); ++i) {
-        const glm::vec3& pos = incoming[i].position;
-
-        // Linear scan — brushes are small (< 32 verts/face typically)
-        bool found = false;
-        for (uint32_t j = 0; j < static_cast<uint32_t>(outVerts.size()); ++j) {
-            if (glm::length(outVerts[j].position - pos) < epsilon) {
-                indexMap[i] = j;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            indexMap[i] = static_cast<uint32_t>(outVerts.size());
-            outVerts.push_back(incoming[i]);
-        }
-    }
-
-    return indexMap;
-}
-
-// Fan-triangulate a convex polygon (polyVertCount vertices starting at baseIdx
-// in the vertex list), emitting indices into `out`.
-static void fanTriangulate(
-    uint32_t              baseIdx,
-    int                   polyVertCount,
-    std::vector<uint32_t>& out) noexcept
-{
-    for (int i = 1; i < polyVertCount - 1; ++i) {
-        out.push_back(baseIdx);
-        out.push_back(baseIdx + static_cast<uint32_t>(i));
-        out.push_back(baseIdx + static_cast<uint32_t>(i + 1));
-    }
-}
-
 // ─── buildFaceMesh ────────────────────────────────────────────────────────────
 
 MeshData buildFaceMesh(const geo::Brush& brush, std::size_t faceIdx) noexcept {

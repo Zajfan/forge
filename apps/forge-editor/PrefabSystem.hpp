@@ -24,7 +24,26 @@ struct Prefab {
     std::vector<geo::Brush> brushes;
     std::string            description;
     std::string            author;
-    std::string            version = "0.1.0";
+    std::string            version = "1.0.0";
+    
+    // Entity metadata (NEW in v1.0.0)
+    bool                   solid = true;
+    bool                   visible = true;
+    std::string            layer = "default";
+};
+
+// ─── Instantiation Options ─────────────────────────────────────────────────────
+
+/// Options for placing a prefab instance in the scene.
+struct PrefabInstantiationOptions {
+    glm::dvec3             position     = {};
+    glm::dquat             rotation     = glm::identity<glm::dquat>();
+    glm::dvec3             scale        = {1.0, 1.0, 1.0};
+    
+    // Entity state overrides (if set, override prefab defaults)
+    std::optional<bool>           solid_override    = std::nullopt;
+    std::optional<bool>           visible_override  = std::nullopt;
+    std::optional<std::string>    layer_override    = std::nullopt;
 };
 
 // ─── Save / Load ─────────────────────────────────────────────────────────────
@@ -40,9 +59,21 @@ struct Prefab {
 [[nodiscard]] std::expected<Prefab, std::string>
 loadPrefab(const std::filesystem::path& path) noexcept;
 
-/// Build a scene BrushEntity from a prefab, placed at the given world position.
+/// Build a scene BrushEntity from a prefab, placed with the given options.
+///
+/// The returned entity has been transformed by the instantiation options.
+/// If no options provided, defaults to world origin with identity rotation/scale.
 [[nodiscard]] scene::BrushEntity instantiatePrefab(
-    const Prefab&    prefab,
-    glm::dvec3       worldPosition = {}) noexcept;
+    const Prefab& prefab,
+    const PrefabInstantiationOptions& opts = {}) noexcept;
+
+/// Build a scene BrushEntity from a prefab at a simple world position (backward compat).
+///
+/// Equivalent to: instantiatePrefab(prefab, PrefabInstantiationOptions{.position = worldPosition})
+[[nodiscard]] inline scene::BrushEntity instantiatePrefab(
+    const Prefab& prefab,
+    glm::dvec3    worldPosition) noexcept {
+    return instantiatePrefab(prefab, PrefabInstantiationOptions{.position = worldPosition});
+}
 
 } // namespace forge::editor

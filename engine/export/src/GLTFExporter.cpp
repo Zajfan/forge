@@ -44,22 +44,6 @@ static int addBufferView(tinygltf::Model& m, const void* data,
     return static_cast<int>(m.bufferViews.size() - 1);
 }
 
-static int addAccessor(tinygltf::Model& m, int bufView,
-                        int componentType, int type, std::size_t count,
-                        const std::vector<double>& mins,
-                        const std::vector<double>& maxs) {
-    tinygltf::Accessor acc;
-    acc.bufferView    = bufView;
-    acc.byteOffset    = 0;
-    acc.componentType = componentType;
-    acc.type          = type;
-    acc.count         = static_cast<int>(count);
-    acc.minValues     = mins;
-    acc.maxValues     = maxs;
-    m.accessors.push_back(acc);
-    return static_cast<int>(m.accessors.size() - 1);
-}
-
 // ─── exportGLTF ──────────────────────────────────────────────────────────────
 
 std::string exportGLTF(
@@ -89,8 +73,11 @@ std::string exportGLTF(
             if (it != matCache.end()) return it->second;
 
             tinygltf::Material mat;
+            const auto baseColor = materialBaseColour(id);
             mat.name                                         = id;
-            mat.pbrMetallicRoughness.baseColorFactor        = materialBaseColour(id);
+            mat.pbrMetallicRoughness.baseColorFactor        = {
+                baseColor.begin(), baseColor.end()
+            };
             mat.pbrMetallicRoughness.metallicFactor         = 0.0;
             mat.pbrMetallicRoughness.roughnessFactor        = 0.8;
             mat.doubleSided                                  = false;
@@ -180,7 +167,7 @@ std::string exportGLTF(
                 prim.attributes["TEXCOORD_0"] = iUV;
                 prim.indices                  = iIdx;
                 prim.mode                     = TINYGLTF_MODE_TRIANGLES;
-                prim.material                 = getMaterial(sub.materialId());
+                prim.material                 = getMaterial(sub.materialId);
 
                 gMesh.primitives.push_back(prim);
             }

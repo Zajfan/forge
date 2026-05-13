@@ -4,6 +4,8 @@
 #include <vector>
 #include <optional>
 
+#include <glm/vec3.hpp>
+
 namespace forge::editor {
 
 // ─── Property definition ─────────────────────────────────────────────────────
@@ -56,7 +58,7 @@ public:
     void add(EntityClassDef def) noexcept;
 
     /// Clear all definitions.
-    void clear() noexcept { defs_.clear(); }
+    void clear() noexcept;
 
     // ── Query ─────────────────────────────────────────────────────────────────
 

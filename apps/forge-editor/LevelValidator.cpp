@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <format>
 #include <set>
+#include <chrono>
 
 namespace forge::editor {
 
@@ -49,7 +50,9 @@ static void addInfo   (ValidationReport& r, std::string ent, std::string msg) {
 
 // ─── validateScene ────────────────────────────────────────────────────────────
 
-ValidationReport validateScene(const scene::Scene& scene) noexcept {
+ValidationReport validateScene(const scene::Scene& scene,
+                                 gfx::MaterialLibrary& materials) noexcept {
+    const auto start = std::chrono::high_resolution_clock::now();
     ValidationReport report;
 
     constexpr double kWorldBound     = 8192.0;
@@ -61,6 +64,8 @@ ValidationReport validateScene(const scene::Scene& scene) noexcept {
     std::size_t totalBrushes = 0;
     std::size_t totalFaces   = 0;
     std::size_t totalEntities = 0;
+    std::size_t orphanedFaceCount = 0;
+    std::size_t disjointBrushCount = 0;
 
     for (const auto& [id, entity] : scene.entities) {
         ++totalEntities;
@@ -115,12 +120,68 @@ ValidationReport validateScene(const scene::Scene& scene) noexcept {
                             std::format("Brush '{}': {}", brush.id, err));
                 }
 
-                // Empty material IDs
+                // ── Material existence checks ────────────────────────────────
+                std::set<std::string> brushMaterials;
                 for (const auto& face : brush.faces) {
-                    if (face.materialId.empty())
+                    if (face.materialId.empty()) {
                         addWarning(report, name,
                             std::format("Brush '{}' has a face with empty materialId.",
                                 brush.id));
+                    } else {
+                        brushMaterials.insert(face.materialId);
+                    }
+                }
+
+                // Check if all materials exist in library
+                for (const auto& matId : brushMaterials) {
+                    if (!materials.getMaterial(matId)) {
+                        addError(report, name,
+                            std::format("Brush '{}' references missing material '{}'.",
+                                brush.id, matId));
+                    }
+                }
+
+                // ── Orphaned faces detection ─────────────────────────────────
+                // Check for faces with degenerate polygons
+                for (std::size_t faceIdx = 0; faceIdx < brush.faces.size(); ++faceIdx) {
+                    const auto& poly = brush.facePolygon(faceIdx);
+                    if (poly.size() < 3) {
+                        ++orphanedFaceCount;
+                        addWarning(report, name,
+                            std::format("Brush '{}' face {} is degenerate (< 3 vertices).",
+                                brush.id, faceIdx));
+                    }
+                }
+
+                // ── Connectivity detection ───────────────────────────────────
+                // Simple check: brush with no shared vertices with others in entity
+                if (be->brushes.size() > 1) {
+                    const auto& brushVerts = brush.vertices();
+                    bool connected = false;
+
+                    for (const auto& other : be->brushes) {
+                        if (other.id == brush.id) continue;
+                        const auto& otherVerts = other.vertices();
+
+                        // Check for shared vertices
+                        for (const auto& v : brushVerts) {
+                            for (const auto& ov : otherVerts) {
+                                if (glm::distance(v, ov) < 0.01) {
+                                    connected = true;
+                                    break;
+                                }
+                            }
+                            if (connected) break;
+                        }
+                        if (connected) break;
+                    }
+
+                    if (!connected) {
+                        ++disjointBrushCount;
+                        addWarning(report, name,
+                            std::format("Brush '{}' is disconnected from other brushes in entity.",
+                                brush.id));
+                    }
                 }
             }
         }
@@ -166,6 +227,12 @@ ValidationReport validateScene(const scene::Scene& scene) noexcept {
         std::format("{} entities, {} brushes, {} faces.",
             totalEntities, totalBrushes, totalFaces));
 
+    if (orphanedFaceCount > 0 || disjointBrushCount > 0) {
+        addInfo(report, "scene",
+            std::format("{} orphaned faces, {} disjoint brushes detected.",
+                orphanedFaceCount, disjointBrushCount));
+    }
+
     const auto brushStats = scene.stats();
     if (brushStats.pointEntityCount > 0)
         addInfo(report, "scene",
@@ -173,6 +240,13 @@ ValidationReport validateScene(const scene::Scene& scene) noexcept {
                 brushStats.pointEntityCount,
                 brushStats.brushEntityCount,
                 brushStats.meshEntityCount));
+
+    // ── Performance metrics ──────────────────────────────────────────────────
+    const auto end = std::chrono::high_resolution_clock::now();
+    report.validationTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+    addInfo(report, "scene",
+        std::format("Validation completed in {}ms.", report.validationTime.count()));
 
     return report;
 }

@@ -41,7 +41,6 @@ Brush makeWedge(glm::dvec3 mins, glm::dvec3 maxs) noexcept {
     // Five faces: bottom, left, right, back, and the diagonal slope
     const glm::dvec3 frontBottom = { mins.x, mins.y, maxs.z };
     const glm::dvec3 backTop     = { mins.x, maxs.y, mins.z };
-    const glm::dvec3 backTopR    = { maxs.x, maxs.y, mins.z };
 
     b.faces = {
         { Plane::fromNormalPoint({-1.0, 0.0, 0.0}, {mins.x, 0.0, 0.0}) }, // -X

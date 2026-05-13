@@ -12,10 +12,6 @@ namespace forge::editor {
 
 static json jV3(glm::dvec3 v) { return { v.x, v.y, v.z }; }
 static json jV2f(glm::vec2 v) { return { v.x, v.y }; }
-
-static glm::dvec3 rV3(const json& j) {
-    return { j[0].get<double>(), j[1].get<double>(), j[2].get<double>() };
-}
 static glm::vec2 rV2f(const json& j) {
     return { j[0].get<float>(), j[1].get<float>() };
 }
@@ -73,11 +69,16 @@ std::string savePrefab(
 {
     try {
         json root;
-        root["forge_prefab_version"] = "0.1.0";
+        root["forge_prefab_version"] = "1.0.0";  // Updated version
         root["name"]        = prefab.name;
         root["description"] = prefab.description;
         root["author"]      = prefab.author;
         root["version"]     = prefab.version;
+
+        // Entity metadata (NEW in v1.0.0)
+        root["solid"]       = prefab.solid;
+        root["visible"]     = prefab.visible;
+        root["layer"]       = prefab.layer;
 
         json brushes = json::array();
         for (const auto& b : prefab.brushes)
@@ -112,7 +113,12 @@ loadPrefab(const std::filesystem::path& path) noexcept {
         p.name        = root.value("name",        path.stem().string());
         p.description = root.value("description", "");
         p.author      = root.value("author",      "");
-        p.version     = root.value("version",     "0.1.0");
+        p.version     = root.value("version",     "1.0.0");
+
+        // Entity metadata (NEW in v1.0.0, backward compatible with v0.1.0)
+        p.solid   = root.value("solid",   true);
+        p.visible = root.value("visible", true);
+        p.layer   = root.value("layer",   "default");
 
         for (const auto& bj : root["brushes"])
             p.brushes.push_back(readBrush(bj));
@@ -133,13 +139,24 @@ loadPrefab(const std::filesystem::path& path) noexcept {
 
 scene::BrushEntity instantiatePrefab(
     const Prefab& prefab,
-    glm::dvec3    worldPosition) noexcept
+    const PrefabInstantiationOptions& opts) noexcept
 {
     scene::BrushEntity e;
     e.name      = prefab.name;
     e.brushes   = prefab.brushes;
-    e.transform = scene::Transform::fromTranslation(worldPosition);
+
+    // Set transform from position, rotation, and scale
+    e.transform.translation = opts.position;
+    e.transform.rotation    = opts.rotation;
+    e.transform.scale       = opts.scale;
+
+    // Apply entity state (overrides take precedence, else use prefab defaults)
+    e.solid   = opts.solid_override.has_value() ? *opts.solid_override   : prefab.solid;
+    e.visible = opts.visible_override.has_value() ? *opts.visible_override : prefab.visible;
+
+    // Invalidate brushes to recompute vertices
     for (auto& b : e.brushes) b.invalidate();
+
     return e;
 }
 

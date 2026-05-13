@@ -7,7 +7,7 @@ namespace forge::gfx::shaders {
 // Brush vertex shader — OpenGL 4.6 Core
 // ─────────────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kBrushVert = R"glsl(
-#version 460 core
+#version 450 core
 
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
@@ -36,7 +36,7 @@ void main() {
 // Brush fragment shader — Blinn-Phong + ambient + gamma correction
 // ─────────────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kBrushFrag = R"glsl(
-#version 460 core
+#version 450 core
 
 in vec3 v_worldPos;
 in vec3 v_normal;
@@ -75,6 +75,20 @@ uniform float u_fogDensity;  // 0 = off
 uniform sampler2DShadow u_shadowMap;
 uniform mat4            u_lightSpaceMatrix;
 uniform bool            u_shadowsEnabled;
+
+float computeShadow(vec3 worldPos, vec3 N, vec3 L) {
+    if (!u_shadowsEnabled) return 0.0;
+
+    vec4 lightClip = u_lightSpaceMatrix * vec4(worldPos, 1.0);
+    vec3 proj      = lightClip.xyz / lightClip.w;
+    proj           = proj * 0.5 + 0.5;
+
+    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0)
+        return 0.0;
+
+    float bias = max(0.0005 * (1.0 - dot(N, L)), 0.00005);
+    return 1.0 - texture(u_shadowMap, vec3(proj.xy, proj.z - bias));
+}
 
 // Blinn-Phong point-light contribution
 vec3 pointLightContrib(int i, vec3 N, vec3 V, vec3 albedo) {
@@ -150,7 +164,7 @@ void main() {
 // Grid vertex shader — infinite grid in the XZ plane
 // ─────────────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kGridVert = R"glsl(
-#version 460 core
+#version 450 core
 
 // Fullscreen triangle trick — no vertex buffer needed
 // gl_VertexID: 0=(−1,−1), 1=(3,−1), 2=(−1,3) → covers entire screen
@@ -177,7 +191,7 @@ void main() {
 // Grid fragment shader — world-space grid with anti-aliasing
 // ─────────────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kGridFrag = R"glsl(
-#version 460 core
+#version 450 core
 
 in vec3 v_nearPoint;
 in vec3 v_farPoint;
@@ -239,7 +253,7 @@ void main() {
 // Shadow depth-only shaders
 // ─────────────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kShadowVert = R"glsl(
-#version 460 core
+#version 450 core
 layout(location = 0) in vec3 a_position;
 uniform mat4 u_lightMVP;
 void main() {
@@ -248,7 +262,7 @@ void main() {
 )glsl";
 
 inline constexpr std::string_view kShadowFrag = R"glsl(
-#version 460 core
+#version 450 core
 // No colour output — only writes gl_FragDepth (automatic)
 void main() {}
 )glsl";
@@ -257,7 +271,7 @@ void main() {}
 // Skybox vertex shader — fullscreen triangle, writes to far depth
 // ─────────────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kSkyboxVert = R"glsl(
-#version 460 core
+#version 450 core
 
 out vec3 v_worldDir;
 uniform mat4 u_invVP;
@@ -280,7 +294,7 @@ void main() {
 // Skybox fragment shader — horizon-zenith-ground gradient
 // ─────────────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kSkyboxFrag = R"glsl(
-#version 460 core
+#version 450 core
 
 in  vec3 v_worldDir;
 out vec4 o_color;
@@ -313,7 +327,7 @@ void main() {
 
 // Shared fullscreen-triangle vertex shader (UV in [0,1])
 inline constexpr std::string_view kFullscreenVert = R"glsl(
-#version 460 core
+#version 450 core
 out vec2 v_uv;
 void main() {
     vec2 pos[3] = vec2[](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
@@ -325,7 +339,7 @@ void main() {
 
 // Bright-pass: keep only pixels above luminance threshold
 inline constexpr std::string_view kBrightPassFrag = R"glsl(
-#version 460 core
+#version 450 core
 in  vec2 v_uv;
 out vec4 o_color;
 uniform sampler2D u_scene;
@@ -346,7 +360,7 @@ void main() {
 
 // 9-tap separable Gaussian blur — run H then V
 inline constexpr std::string_view kGaussianBlurFrag = R"glsl(
-#version 460 core
+#version 450 core
 in  vec2 v_uv;
 out vec4 o_color;
 uniform sampler2D u_tex;
@@ -368,7 +382,7 @@ void main() {
 
 // Composite: additive blend bloom on top of scene
 inline constexpr std::string_view kBloomCompositeFrag = R"glsl(
-#version 460 core
+#version 450 core
 in  vec2 v_uv;
 out vec4 o_color;
 uniform sampler2D u_scene;
@@ -392,7 +406,7 @@ void main() {
 // PBR (Physically Based Rendering) vertex shader — Cook-Torrance BRDF
 // ─────────────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kPBRVert = R"glsl(
-#version 460 core
+#version 450 core
 
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
@@ -421,7 +435,7 @@ void main() {
 // PBR fragment shader — Cook-Torrance with metallic/roughness/normal/AO
 // ─────────────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kPBRFrag = R"glsl(
-#version 460 core
+#version 450 core
 
 in vec3 v_worldPos;
 in vec3 v_normal;

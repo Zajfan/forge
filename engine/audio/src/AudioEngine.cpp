@@ -21,7 +21,9 @@ struct AudioEngine::SoundSlot {
 
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 
-AudioEngine::AudioEngine()  : engine_(std::make_unique<ma_engine>()) {}
+AudioEngine::AudioEngine()
+    : engine_(std::make_unique<ma_engine>())
+    , pool_(std::make_unique<SoundSlot[]>(kSoundPoolSize)) {}
 AudioEngine::~AudioEngine() { shutdown(); }
 
 bool AudioEngine::init() noexcept {
@@ -150,7 +152,7 @@ void AudioEngine::play2D(const std::string& file, float volume, bool loop) noexc
 }
 
 void AudioEngine::stopAll() noexcept {
-    for (auto& slot : pool_) slot.reset();
+    for (int i = 0; i < kSoundPoolSize; ++i) pool_[i].reset();
 }
 
 void AudioEngine::setMasterVolume(float v) noexcept {
@@ -160,7 +162,8 @@ void AudioEngine::setMasterVolume(float v) noexcept {
 
 void AudioEngine::update() noexcept {
     if (!initialised_) return;
-    for (auto& slot : pool_) {
+    for (int i = 0; i < kSoundPoolSize; ++i) {
+        auto& slot = pool_[i];
         if (slot.inUse && ma_sound_at_end(&slot.sound)) {
             slot.reset();
         }

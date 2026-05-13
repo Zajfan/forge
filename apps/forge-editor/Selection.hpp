@@ -2,9 +2,13 @@
 
 #include <forge/scene.hpp>
 #include <forge/gfx/Camera.hpp>
+#include <glm/vec3.hpp>
 #include <glm/vec2.hpp>
+#include <algorithm>
 #include <limits>
 #include <optional>
+#include <ranges>
+#include <vector>
 
 namespace forge::editor {
 
@@ -32,6 +36,19 @@ struct FaceSelection {
     void clear() noexcept { entityId = scene::kInvalidEntityId; }
     void select(scene::EntityId id, std::size_t b, std::size_t f) noexcept {
         entityId = id; brushIdx = b; faceIdx = f;
+    }
+};
+
+struct VertexSelection {
+    scene::EntityId entityId = scene::kInvalidEntityId;
+    std::size_t     brushIdx = 0;
+    glm::dvec3      position = {};
+
+    [[nodiscard]] bool valid() const noexcept { return entityId != scene::kInvalidEntityId; }
+    void clear() noexcept {
+        entityId = scene::kInvalidEntityId;
+        brushIdx = 0;
+        position = {};
     }
 };
 
@@ -71,9 +88,22 @@ struct FaceSelection {
     float           bestT  = std::numeric_limits<float>::max();
 
     for (const auto& [id, entity] : scene.entities) {
-        const auto* be = std::get_if<scene::BrushEntity>(&entity);
-        if (!be || !be->visible) continue;
-        const geo::AABB bounds = be->worldBounds();
+        geo::AABB bounds;
+        if (const auto* be = std::get_if<scene::BrushEntity>(&entity)) {
+            if (!be->visible) continue;
+            bounds = be->worldBounds();
+        } else if (const auto* pe = std::get_if<scene::PointEntity>(&entity)) {
+            bounds.expand(pe->transform.translation);
+            bounds.expand(pe->transform.translation + glm::dvec3{16.0, 16.0, 16.0});
+            bounds.expand(pe->transform.translation - glm::dvec3{16.0, 16.0, 16.0});
+        } else if (const auto* me = std::get_if<scene::MeshEntity>(&entity)) {
+            if (!me->visible) continue;
+            bounds.expand(me->transform.translation);
+            bounds.expand(me->transform.translation + glm::dvec3{16.0, 16.0, 16.0});
+            bounds.expand(me->transform.translation - glm::dvec3{16.0, 16.0, 16.0});
+        } else {
+            continue;
+        }
         if (!bounds.isValid()) continue;
         float t = 0.f;
         if (rayVsAABB(orig, dir, bounds, t) && t < bestT) {
@@ -83,8 +113,6 @@ struct FaceSelection {
     }
     return bestId;
 }
-
-} // namespace forge::editor
 
 // ─── MultiSelection ──────────────────────────────────────────────────────────
 
@@ -127,6 +155,8 @@ struct MultiSelection {
         if (id != scene::kInvalidEntityId) ids.push_back(id);
     }
 
+    void selectEntity(scene::EntityId id) noexcept { set(id); }
+
     void clear() noexcept { ids.clear(); }
 
     /// Combined world-space AABB of all selected BrushEntities.
@@ -141,3 +171,5 @@ struct MultiSelection {
         return box;
     }
 };
+
+} // namespace forge::editor

@@ -113,7 +113,7 @@ int main() {
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGui_ImplSDL3_InitForOpenGL(window.sdlWindow(), window.glContext());
-    ImGui_ImplOpenGL3_Init("#version 460");
+    ImGui_ImplOpenGL3_Init("#version 450");
 
     // ── Renderer ──────────────────────────────────────────────────────────────
     gfx::Renderer renderer;
@@ -195,10 +195,12 @@ int main() {
 
         for (const auto& re : renderEntities) {
             for (const auto& submesh : re.gpuMesh.submeshes) {
+                auto material = std::make_shared<gfx::Material>(submesh.materialId());
+                material->albedoColor = materialColour(submesh.materialId());
                 renderer.submit({
                     .mesh        = &submesh,
                     .modelMatrix = re.model,
-                    .albedo      = materialColour(submesh.materialId()),
+                    .material    = std::move(material),
                 });
             }
         }

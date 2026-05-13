@@ -1,8 +1,10 @@
 #pragma once
 
 #include <forge/scene.hpp>
+#include <forge/gfx/Material.hpp>
 #include <string>
 #include <vector>
+#include <chrono>
 
 namespace forge::editor {
 
@@ -29,6 +31,7 @@ struct ValidationIssue {
 
 struct ValidationReport {
     std::vector<ValidationIssue> issues;
+    std::chrono::milliseconds     validationTime{0};  ///< Time taken to validate
 
     [[nodiscard]] bool hasErrors()   const noexcept;
     [[nodiscard]] bool hasWarnings() const noexcept;
@@ -48,6 +51,7 @@ struct ValidationReport {
 ///     • BrushEntity has no brushes
 ///     • geo::Brush::validate() fails (degenerate geometry)
 ///     • Scene has no info_player_start
+///     • Material ID referenced but not in library
 ///
 ///   Warnings:
 ///     • BrushFace has empty materialId
@@ -55,9 +59,14 @@ struct ValidationReport {
 ///     • Entity translation outside world bounds (±8192 units)
 ///     • Total brush count > 2048 (performance warning)
 ///     • BrushEntity with > 64 brushes (consider splitting)
+///     • Orphaned/isolated faces detected
+///     • Disjoint brush fragments (no connectivity)
 ///
 ///   Info:
 ///     • Total entity/brush/face statistics
-[[nodiscard]] ValidationReport validateScene(const scene::Scene& scene) noexcept;
+///     • Validation performance metrics
+[[nodiscard]] ValidationReport validateScene(
+    const scene::Scene& scene,
+    gfx::MaterialLibrary& materials) noexcept;
 
 } // namespace forge::editor

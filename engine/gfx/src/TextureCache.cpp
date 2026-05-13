@@ -36,7 +36,6 @@ static uint32_t uploadRGBA(const uint8_t* pixels, int w, int h) noexcept {
 
 TextureCache::TextureCache() {
     stbi_set_flip_vertically_on_load(true); // OpenGL Y-up convention
-    createFallback();
 }
 
 TextureCache::~TextureCache() { evictAll(); }
@@ -98,6 +97,9 @@ uint32_t TextureCache::uploadTexture(const std::filesystem::path& path) noexcept
 }
 
 uint32_t TextureCache::load(const std::string& materialId) noexcept {
+    // Create fallback lazily once a valid GL context is expected to exist.
+    if (fallbackId_ == 0) createFallback();
+
     // Return cached entry
     if (const auto it = cache_.find(materialId); it != cache_.end())
         return it->second;

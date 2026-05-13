@@ -189,7 +189,6 @@ bool exportOBJ(
 
                 // Emit face triangles (fan triangulation)
                 const int vb  = vBase;
-                const int vtb = vtBase;
                 const int vnb = vnBase;
 
                 for (const auto& [a, b, c] : triangulate(vertCount)) {

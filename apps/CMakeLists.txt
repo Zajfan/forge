@@ -1,3 +1,6 @@
 add_subdirectory(forge-cli)
 add_subdirectory(forge-viewer)
-add_subdirectory(forge-editor)
+
+if(FORGE_BUILD_EDITOR)
+	add_subdirectory(forge-editor)
+endif()

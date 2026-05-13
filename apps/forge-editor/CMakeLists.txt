@@ -1,5 +1,4 @@
 find_package(Lua REQUIRED)
-find_package(imgui    CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(imguizmo CONFIG REQUIRED)
 # portable-file-dialogs is header-only
@@ -18,10 +17,14 @@ target_include_directories(forge-editor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${LU
 
 target_link_libraries(forge-editor
     PRIVATE
+        forge::audio
+        forge::bsp
         forge::gfx
         forge::export
         forge::runtime
-        imgui::imgui
+        forge::script
+        forge::serial
+        forge::imgui
         imguizmo::imguizmo
         ${LUA_LIBRARIES}
         forge_compile_options

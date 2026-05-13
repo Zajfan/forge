@@ -1,10 +1,11 @@
 #include "forge/gfx/Window.hpp"
 
 #include <SDL3/SDL.h>
-#include <SDL3/SDL_opengl.h>
 #include <GL/glew.h>
+#include <SDL3/SDL_opengl.h>
 
 #include <chrono>
+#include <functional>
 #include <format>
 #include <iostream>
 
@@ -21,6 +22,7 @@ struct Window::Impl {
     bool  shouldClose = false;
 
     InputState input;
+    std::function<void(const SDL_Event&)> eventCallback;
 
     // Timing
     using Clock = std::chrono::steady_clock;
@@ -31,6 +33,10 @@ struct Window::Impl {
     float fpsTimer   = 0.f;
 };
 
+void Window::ImplDeleter::operator()(Impl* p) const noexcept {
+    delete p;
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 std::expected<Window, std::string>
@@ -39,17 +45,24 @@ Window::create(const WindowConfig& cfg) noexcept {
         return std::unexpected(std::format("SDL_Init failed: {}", SDL_GetError()));
     }
 
-    // OpenGL context attributes
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, cfg.glMajor);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, cfg.glMinor);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,  SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,   24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE,  8);
-    if (cfg.msaaSamples > 1) {
-        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
-        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, cfg.msaaSamples);
-    }
+    auto setGLAttributes = [](int major, int minor, int msaaSamples) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,  SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,   24);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE,  8);
+        if (msaaSamples > 1) {
+            SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
+            SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, msaaSamples);
+        } else {
+            SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 0);
+            SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 0);
+        }
+    };
+
+    // Try requested profile first; then relax requirements for compatibility.
+    setGLAttributes(cfg.glMajor, cfg.glMinor, cfg.msaaSamples);
 
     // Create window
     SDL_WindowFlags flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
@@ -61,23 +74,42 @@ Window::create(const WindowConfig& cfg) noexcept {
         return std::unexpected(std::format("SDL_CreateWindow failed: {}", SDL_GetError()));
     }
 
-    // Create GL context
-    SDL_GLContext ctx = SDL_GL_CreateContext(sdlWin);
+    auto tryCreateContext = [&]() -> SDL_GLContext {
+        SDL_GLContext c = SDL_GL_CreateContext(sdlWin);
+        if (c) {
+            SDL_GL_MakeCurrent(sdlWin, c);
+            SDL_GL_SetSwapInterval(1); // vsync
+        }
+        return c;
+    };
+
+    SDL_GLContext ctx = tryCreateContext();
+    if (!ctx) {
+        setGLAttributes(3, 3, 0);
+        ctx = tryCreateContext();
+    }
+    if (!ctx) {
+        setGLAttributes(3, 0, 0);
+        ctx = tryCreateContext();
+    }
     if (!ctx) {
         SDL_DestroyWindow(sdlWin);
         return std::unexpected(std::format("SDL_GL_CreateContext failed: {}", SDL_GetError()));
     }
 
-    SDL_GL_MakeCurrent(sdlWin, ctx);
-    SDL_GL_SetSwapInterval(1); // vsync
-
     // Initialise GLEW
     glewExperimental = GL_TRUE;
     if (const GLenum err = glewInit(); err != GLEW_OK) {
-        SDL_GL_DeleteContext(ctx);
-        SDL_DestroyWindow(sdlWin);
-        return std::unexpected(std::format("glewInit failed: {}",
-            reinterpret_cast<const char*>(glewGetErrorString(err))));
+#ifdef GLEW_ERROR_NO_GLX_DISPLAY
+        // Wayland/EGL paths can report this GLX-specific status even with a valid GL context.
+        if (err != GLEW_ERROR_NO_GLX_DISPLAY)
+#endif
+        {
+            SDL_GL_DestroyContext(ctx);
+            SDL_DestroyWindow(sdlWin);
+            return std::unexpected(std::format("glewInit failed: {}",
+                reinterpret_cast<const char*>(glewGetErrorString(err))));
+        }
     }
 
     // Initial GL state
@@ -91,7 +123,7 @@ Window::create(const WindowConfig& cfg) noexcept {
         reinterpret_cast<const char*>(glGetString(GL_VERSION)));
 
     Window w;
-    w.impl_ = std::make_unique<Impl>();
+    w.impl_ = std::unique_ptr<Impl, Window::ImplDeleter>(new Impl{});
     w.impl_->sdlWindow = sdlWin;
     w.impl_->glContext = ctx;
     w.impl_->width     = cfg.width;
@@ -103,7 +135,7 @@ Window::create(const WindowConfig& cfg) noexcept {
 
 Window::~Window() {
     if (impl_) {
-        if (impl_->glContext)  SDL_GL_DeleteContext(impl_->glContext);
+        if (impl_->glContext)  SDL_GL_DestroyContext(impl_->glContext);
         if (impl_->sdlWindow)  SDL_DestroyWindow(impl_->sdlWindow);
         SDL_Quit();
     }
@@ -143,6 +175,8 @@ void Window::pollEvents() noexcept {
 
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        if (s.eventCallback) s.eventCallback(event);
+
         switch (event.type) {
         case SDL_EVENT_QUIT:
             s.shouldClose = true;
@@ -183,12 +217,20 @@ void Window::pollEvents() noexcept {
             case SDLK_D:      s.input.keys.d      = down; break;
             case SDLK_Q:      s.input.keys.q      = down; break;
             case SDLK_E:      s.input.keys.e      = down; break;
+            case SDLK_R:      s.input.keys.r      = down; break;
+            case SDLK_T:      s.input.keys.t      = down; break;
+            case SDLK_Y:      s.input.keys.y      = down; break;
+            case SDLK_C:      s.input.keys.c      = down; break;
+            case SDLK_V:      s.input.keys.v      = down; break;
+            case SDLK_P:      s.input.keys.p      = down; break;
             case SDLK_LSHIFT:
             case SDLK_RSHIFT: s.input.keys.shift  = down; break;
             case SDLK_LCTRL:
             case SDLK_RCTRL:  s.input.keys.ctrl   = down; break;
-            case SDLK_ESCAPE: s.input.keys.escape  = down;
-                              if (down) s.shouldClose = true; break;
+            case SDLK_ESCAPE:
+                s.input.keys.escape = down;
+                if (down) s.shouldClose = true;
+                break;
             case SDLK_F1:     s.input.keys.f1      = down; break;
             case SDLK_F5:     s.input.keys.f5      = down; break;
             default: break;
@@ -199,6 +241,10 @@ void Window::pollEvents() noexcept {
         default: break;
         }
     }
+}
+
+void Window::setEventCallback(std::function<void(const SDL_Event&)> callback) noexcept {
+    impl_->eventCallback = std::move(callback);
 }
 
 void Window::swapBuffers() noexcept {

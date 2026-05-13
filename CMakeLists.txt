@@ -25,9 +25,13 @@ endif()
 option(FORGE_BUILD_TESTS   "Build Catch2 test suite"           ON)
 option(FORGE_BUILD_EDITOR  "Build the editor application"      OFF) # Phase 1+
 option(FORGE_WERROR        "Treat warnings as errors"          OFF)
+option(FORGE_USE_BUNDLED_IMGUI "Use vendored ImGui docking source" ON)
 
 # ── Compiler warnings ─────────────────────────────────────────────────────────
 add_library(forge_compile_options INTERFACE)
+
+# GLM experimental extensions (gtx) used across all modules
+target_compile_definitions(forge_compile_options INTERFACE GLM_ENABLE_EXPERIMENTAL)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(forge_compile_options INTERFACE
@@ -44,6 +48,45 @@ endif()
 
 # ── Dependencies (via vcpkg) ──────────────────────────────────────────────────
 find_package(glm     CONFIG REQUIRED)
+
+if(FORGE_USE_BUNDLED_IMGUI)
+    find_package(SDL3   CONFIG REQUIRED)
+    find_package(GLEW   REQUIRED)
+    find_package(OpenGL REQUIRED)
+
+    set(FORGE_IMGUI_DIR "${CMAKE_SOURCE_DIR}/third_party/imgui")
+    if(NOT EXISTS "${FORGE_IMGUI_DIR}/imgui.h")
+        message(FATAL_ERROR "FORGE_USE_BUNDLED_IMGUI is ON but third_party/imgui is missing. Clone the docking branch into third_party/imgui.")
+    endif()
+
+    add_library(forge-imgui STATIC
+        ${FORGE_IMGUI_DIR}/imgui.cpp
+        ${FORGE_IMGUI_DIR}/imgui_demo.cpp
+        ${FORGE_IMGUI_DIR}/imgui_draw.cpp
+        ${FORGE_IMGUI_DIR}/imgui_tables.cpp
+        ${FORGE_IMGUI_DIR}/imgui_widgets.cpp
+        ${FORGE_IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
+        ${FORGE_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+    )
+    add_library(forge::imgui ALIAS forge-imgui)
+
+    target_include_directories(forge-imgui
+        PUBLIC
+            ${FORGE_IMGUI_DIR}
+            ${FORGE_IMGUI_DIR}/backends
+    )
+    target_compile_definitions(forge-imgui PRIVATE IMGUI_IMPL_OPENGL_LOADER_GLEW)
+    target_link_libraries(forge-imgui
+        PUBLIC forge_compile_options
+        PRIVATE SDL3::SDL3 GLEW::GLEW OpenGL::GL
+    )
+    target_compile_features(forge-imgui PUBLIC cxx_std_23)
+else()
+    find_package(imgui CONFIG REQUIRED)
+    add_library(forge-imgui INTERFACE)
+    add_library(forge::imgui ALIAS forge-imgui)
+    target_link_libraries(forge-imgui INTERFACE imgui::imgui forge_compile_options)
+endif()
 
 if(FORGE_BUILD_TESTS)
     find_package(Catch2  3  CONFIG REQUIRED)

@@ -143,6 +143,7 @@ computeFacePolygon(const Brush& brush, std::size_t faceIdx) noexcept {
 void Brush::invalidate() noexcept {
     cachedVertices.reset();
     cachedFacePolygons.reset();
+    cachedBounds.reset();
 }
 
 const std::vector<glm::dvec3>& Brush::vertices() const noexcept {
@@ -168,10 +169,13 @@ Brush::facePolygon(std::size_t faceIdx) const noexcept {
 }
 
 AABB Brush::bounds() const noexcept {
-    AABB box;
-    for (const auto& v : vertices())
-        box.expand(v);
-    return box;
+    if (!cachedBounds) {
+        AABB box;
+        for (const auto& v : vertices())
+            box.expand(v);
+        cachedBounds = box;
+    }
+    return *cachedBounds;
 }
 
 BrushValidation Brush::validate() const noexcept {

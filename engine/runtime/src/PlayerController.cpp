@@ -148,7 +148,7 @@ void PlayerController::update(float dt, const gfx::InputState& input,
         JPH::Vec3(0.f, gravity, 0.f),
         updateSettings,
         sys->GetDefaultBroadPhaseLayerFilter(
-            static_cast<JPH::BroadPhaseLayer>(0)), // STATIC layer
+            static_cast<JPH::ObjectLayer>(physics.movingLayer())),
         sys->GetDefaultLayerFilter(
             static_cast<JPH::ObjectLayer>(physics.movingLayer())),
         {},  // body filter (none)

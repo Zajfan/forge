@@ -61,4 +61,47 @@ csgSubtract(const Brush& subject, std::span<const Brush> cutters) noexcept;
 [[nodiscard]] std::vector<Brush>
 hollowBrush(const Brush& brush, double wallThickness) noexcept;
 
+// ─── CSG Intersect ────────────────────────────────────────────────────────────
+
+/// Compute the intersection of two brushes.
+///
+/// Returns the region that is inside BOTH brushes. This is equivalent to:
+/// (subject − (subject − cutter)) but more direct: apply all cutter faces
+/// to cut the subject from the back side.
+///
+/// @returns 0–N convex brush fragments representing the intersection.
+///          Returns {} if the brushes do not overlap.
+[[nodiscard]] std::vector<Brush>
+csgIntersect(const Brush& subject, const Brush& cutter) noexcept;
+
+// ─── CSG Union ────────────────────────────────────────────────────────────────
+
+/// Compute the union of two brushes.
+///
+/// Returns all fragments that are in either brush. This operation may produce
+/// a larger number of fragments than the inputs because the result is a
+/// collection of convex brushes that may not perfectly fit together (i.e.,
+/// the union is represented as the collection of overlapping convex pieces,
+/// not a single concave brush).
+///
+/// @returns 1+ convex brush fragments covering (subject ∪ cutter).
+///          Returns { subject, cutter } if they don't overlap or touch.
+///          May return fewer fragments if brushes are touching or overlapping
+///          in a way that produces a convex result.
+[[nodiscard]] std::vector<Brush>
+csgUnion(const Brush& subject, const Brush& cutter) noexcept;
+
+// ─── CSG XOR ──────────────────────────────────────────────────────────────────
+
+/// Compute the symmetric difference of two brushes.
+///
+/// Returns the regions that are in subject OR cutter, but NOT in both.
+/// Equivalent to: (subject − cutter) ∪ (cutter − subject)
+///
+/// @returns 0–N convex brush fragments covering the symmetric difference.
+///          Returns {} if brushes are identical.
+///          Returns { subject, cutter } if they don't overlap.
+[[nodiscard]] std::vector<Brush>
+csgXor(const Brush& subject, const Brush& cutter) noexcept;
+
 } // namespace forge::geo

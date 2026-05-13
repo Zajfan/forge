@@ -1,6 +1,7 @@
 #include "forge/scene/Transform.hpp"
 
 #include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtx/quaternion.hpp>
 
 namespace forge::scene {
 
@@ -8,7 +9,7 @@ glm::dmat4 Transform::matrix() const noexcept {
     // T * R * S
     glm::dmat4 m = glm::identity<glm::dmat4>();
     m = glm::translate(m, translation);
-    m = m * glm::dmat4_cast(rotation);
+    m = m * glm::mat4_cast(rotation);
     m = glm::scale(m, scale);
     return m;
 }

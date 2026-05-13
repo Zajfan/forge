@@ -64,6 +64,9 @@ struct Brush {
     /// Per-face convex polygon — cachedFacePolygons[i] corresponds to faces[i].
     mutable std::optional<std::vector<std::vector<glm::dvec3>>>     cachedFacePolygons;
 
+    /// Tight axis-aligned bounding box (cached for performance).
+    mutable std::optional<AABB>                                     cachedBounds;
+
     // ── Query interface ───────────────────────────────────────────────────────
 
     /// All brush vertices. Computed and cached on first call after invalidation.

@@ -112,8 +112,8 @@ void Renderer::submit(const DrawCall& dc) noexcept {
         int textureUnit = 0;
         
         if (!dc.material->albedoTextureId.empty()) {
-            auto tex = textureCache_.get(dc.material->albedoTextureId);
-            if (tex) {
+            const auto tex = textureCache_.load(dc.material->albedoTextureId);
+            if (tex != 0) {
                 glActiveTexture(GL_TEXTURE0 + textureUnit);
                 glBindTexture(GL_TEXTURE_2D, tex);
                 activeShader.setBool("u_hasAlbedoMap", true);
@@ -125,8 +125,8 @@ void Renderer::submit(const DrawCall& dc) noexcept {
         }
 
         if (!dc.material->normalTextureId.empty()) {
-            auto tex = textureCache_.get(dc.material->normalTextureId);
-            if (tex) {
+            const auto tex = textureCache_.load(dc.material->normalTextureId);
+            if (tex != 0) {
                 glActiveTexture(GL_TEXTURE0 + textureUnit);
                 glBindTexture(GL_TEXTURE_2D, tex);
                 activeShader.setBool("u_hasNormalMap", true);
@@ -138,8 +138,8 @@ void Renderer::submit(const DrawCall& dc) noexcept {
         }
 
         if (!dc.material->metallicTextureId.empty()) {
-            auto tex = textureCache_.get(dc.material->metallicTextureId);
-            if (tex) {
+            const auto tex = textureCache_.load(dc.material->metallicTextureId);
+            if (tex != 0) {
                 glActiveTexture(GL_TEXTURE0 + textureUnit);
                 glBindTexture(GL_TEXTURE_2D, tex);
                 activeShader.setBool("u_hasMetallicMap", true);
@@ -151,8 +151,8 @@ void Renderer::submit(const DrawCall& dc) noexcept {
         }
 
         if (!dc.material->roughnessTextureId.empty()) {
-            auto tex = textureCache_.get(dc.material->roughnessTextureId);
-            if (tex) {
+            const auto tex = textureCache_.load(dc.material->roughnessTextureId);
+            if (tex != 0) {
                 glActiveTexture(GL_TEXTURE0 + textureUnit);
                 glBindTexture(GL_TEXTURE_2D, tex);
                 activeShader.setBool("u_hasRoughnessMap", true);
@@ -164,8 +164,8 @@ void Renderer::submit(const DrawCall& dc) noexcept {
         }
 
         if (!dc.material->aoTextureId.empty()) {
-            auto tex = textureCache_.get(dc.material->aoTextureId);
-            if (tex) {
+            const auto tex = textureCache_.load(dc.material->aoTextureId);
+            if (tex != 0) {
                 glActiveTexture(GL_TEXTURE0 + textureUnit);
                 glBindTexture(GL_TEXTURE_2D, tex);
                 activeShader.setBool("u_hasAOMap", true);
@@ -177,8 +177,8 @@ void Renderer::submit(const DrawCall& dc) noexcept {
         }
 
         if (!dc.material->emissiveTextureId.empty()) {
-            auto tex = textureCache_.get(dc.material->emissiveTextureId);
-            if (tex) {
+            const auto tex = textureCache_.load(dc.material->emissiveTextureId);
+            if (tex != 0) {
                 glActiveTexture(GL_TEXTURE0 + textureUnit);
                 glBindTexture(GL_TEXTURE_2D, tex);
                 activeShader.setBool("u_hasEmissiveMap", true);
@@ -210,14 +210,6 @@ void Renderer::submit(const DrawCall& dc) noexcept {
 void Renderer::endFrame() noexcept {
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     pbrEnabled_ ? pbrShader_.unbind() : shader_.unbind();
-}
-
-void Renderer::uploadShadowUniforms(const RenderFrame& frame) noexcept {
-    Shader& activeShader = pbrEnabled_ ? pbrShader_ : shader_;
-    activeShader.bind();
-    activeShader.setBool ("u_shadowsEnabled",   frame.shadowsEnabled);
-    activeShader.setMat4 ("u_lightSpaceMatrix", frame.lightSpaceMatrix);
-    activeShader.setInt  ("u_shadowMap",        frame.shadowMapUnit);
 }
 
 } // namespace forge::gfx

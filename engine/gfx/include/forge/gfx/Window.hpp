@@ -1,12 +1,15 @@
 #pragma once
 
 #include <expected>
+#include <functional>
 #include <memory>
 #include <string>
 
 // Forward-declare SDL types to avoid polluting headers with SDL3 includes
 struct SDL_Window;
-typedef void* SDL_GLContext;
+union SDL_Event;
+struct SDL_GLContextState;
+using SDL_GLContext = SDL_GLContextState*;
 
 namespace forge::gfx {
 
@@ -23,7 +26,8 @@ struct MouseState {
 
 struct KeyState {
     bool w = false, a = false, s = false, d = false;
-    bool q = false, e = false;
+    bool q = false, e = false, r = false;
+    bool t = false, y = false, c = false, v = false, p = false;  ///< face tool shortcuts
     bool shift = false, ctrl = false;
     bool escape = false;
     bool f1 = false;   ///< toggle wireframe
@@ -74,6 +78,10 @@ public:
     /// Call at the start of each frame.
     void pollEvents() noexcept;
 
+    /// Optional hook invoked for every SDL event before internal handling.
+    /// Useful for integrations such as ImGui's SDL backend event processing.
+    void setEventCallback(std::function<void(const SDL_Event&)> callback) noexcept;
+
     /// Swap front/back buffers.
     /// Call at the end of each frame.
     void swapBuffers() noexcept;
@@ -94,7 +102,10 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    struct ImplDeleter {
+        void operator()(Impl* p) const noexcept;
+    };
+    std::unique_ptr<Impl, ImplDeleter> impl_;
 };
 
 } // namespace forge::gfx

@@ -2,6 +2,7 @@
 
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_opengl3.h>
+#include <imgui_internal.h>
 #include <GL/glew.h>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -9,6 +10,7 @@
 #include <glm/gtx/matrix_decompose.hpp>
 
 #include <array>
+#include <algorithm>
 #include <format>
 #include <iostream>
 #include <forge/export/GLTFExporter.hpp>
@@ -17,6 +19,8 @@
 #include <filesystem>
 #include <chrono>
 #include <functional>
+#include <limits>
+#include <unordered_set>
 
 namespace forge::editor {
 
@@ -32,6 +36,40 @@ static const std::array<glm::vec3, 8> kPalette = {{
 glm::vec3 EditorApp::materialColour(const std::string& id) const noexcept {
     return kPalette[std::hash<std::string>{}(id) % kPalette.size()];
 }
+
+static std::shared_ptr<gfx::Material> makeEditorMaterial(
+    gfx::MaterialLibrary& library,
+    const std::string& materialId,
+    const glm::vec3& color)
+{
+    const std::string resolvedId = materialId.empty() ? "default" : materialId;
+    auto material = library.getMaterial(resolvedId);
+    if (!material) {
+        material = library.getOrCreateMaterial(resolvedId);
+        material->albedoColor = color;
+    }
+    return material;
+}
+
+static ImTextureID toImTextureID(uint32_t textureId) noexcept {
+    return static_cast<ImTextureID>(static_cast<uintptr_t>(textureId));
+}
+
+static void drawVertexSeparator() {
+#ifdef ImGuiSeparatorFlags_Vertical
+    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+#else
+    ImGui::TextDisabled("|");
+#endif
+    ImGui::SameLine();
+}
+
+static void drawVertexProperties_impl(
+    EditorApp& app,
+    scene::Scene& scene,
+    VertexSelection& vs,
+    CommandStack& cmds,
+    const std::function<void(scene::EntityId)>& rebuildFn);
 
 void EditorApp::setStatus(std::string msg, float dur) {
     statusMessage_ = std::move(msg);
@@ -58,7 +96,9 @@ bool EditorApp::init() {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+#ifdef IMGUI_HAS_DOCK
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+#endif
     ImGui::StyleColorsDark();
     auto& st = ImGui::GetStyle();
     st.WindowRounding = 4.f; st.FrameRounding = 3.f; st.TabRounding = 3.f;
@@ -66,17 +106,41 @@ bool EditorApp::init() {
     st.Colors[ImGuiCol_MenuBarBg] = {0.10f,0.10f,0.11f,1.f};
     st.Colors[ImGuiCol_Header]    = {0.22f,0.40f,0.65f,0.6f};
     ImGui_ImplSDL3_InitForOpenGL(window_.sdlWindow(), window_.glContext());
-    ImGui_ImplOpenGL3_Init("#version 460");
+    ImGui_ImplOpenGL3_Init("#version 450");
+    window_.setEventCallback([](const SDL_Event& event) {
+        ImGui_ImplSDL3_ProcessEvent(&event);
+    });
 
     if (!renderer_.init()) { std::cerr << "[error] Renderer init\n"; return false; }
-    gridRenderer_.init();
-    skyboxRenderer_.init();
-    shadowMap_.init(2048);
-    bloomRenderer_.init();
-    audioEngine_.init();
+    if (!gridRenderer_.init()) {
+        std::cerr << "[error] Grid renderer init failed\n";
+        return false;
+    }
+    if (!skyboxRenderer_.init()) {
+        std::cerr << "[warn] Skybox renderer init failed; disabling skybox\n";
+        showSkybox_ = false;
+    }
+    if (!shadowMap_.init(2048)) {
+        std::cerr << "[warn] Shadow map init failed; disabling shadows\n";
+        showShadows_ = false;
+    }
+    if (!bloomRenderer_.init()) {
+        std::cerr << "[warn] Bloom init failed; disabling bloom\n";
+        bloomEnabled_ = false;
+        showBloom_ = false;
+    }
+    if (!audioEngine_.init()) {
+        std::cerr << "[warn] Audio init failed; continuing without audio\n";
+        audioInitialised_ = false;
+    } else {
+        audioInitialised_ = true;
+    }
     audioEngine_.setSoundRoot(std::filesystem::current_path() / "sounds");
     audioEngine_.setMasterVolume(masterVolume_);
-    scriptEnv_.init();
+    if (!scriptEnv_.init()) {
+        std::cerr << "[warn] Script environment init failed; script console disabled\n";
+        showScriptConsole_ = false;
+    }
     scriptEnv_.bindScene(&scene_);
     globalRegistry().loadBuiltins();
     textureCache_.setTextureRoot(std::filesystem::current_path() / "textures");
@@ -97,6 +161,18 @@ void EditorApp::buildDefaultScene() {
     scene_ = {}; scene_.name = "untitled";
     selection_.clear(); faceSelection_.clear();
     commands_.clear(); gpuData_.clear();
+    entityLayers_.clear();
+    entityGroups_.clear();
+    hiddenEntities_.clear();
+    isolatedEntities_.clear();
+    layerVisibility_.clear();
+    layerLocked_.clear();
+    layerTint_.clear();
+    soloLayer_.clear();
+    groupFilter_.clear();
+    layerVisibility_["Default"] = true;
+    layerLocked_["Default"] = false;
+    layerTint_["Default"] = {1.f, 1.f, 1.f};
 
     auto add = [&](scene::BrushEntity e) {
         auto id = scene_.addEntity(std::move(e)); rebuildEntityMesh(id); };
@@ -120,6 +196,11 @@ void EditorApp::buildDefaultScene() {
     { scene::PointEntity pe; pe.name="player_start"; pe.classname="info_player_start";
       pe.transform=scene::Transform::fromTranslation({0,32,0}); scene_.addEntity(std::move(pe)); }
 
+    for (const auto& [id, _] : scene_.entities) {
+        entityLayers_[id] = "Default";
+        entityGroups_[id] = "";
+    }
+
     camera_.frameAABB(scene_.worldBounds());
     setStatus("Default scene loaded");
 }
@@ -137,9 +218,469 @@ void EditorApp::rebuildEntityMesh(scene::EntityId id) {
     gpuData_[id] = std::move(d);
 }
 
+void EditorApp::updateEntityTransform(scene::EntityId id) {
+    auto* e = scene_.getEntity(id);
+    if (!e) return;
+    if (auto it = gpuData_.find(id); it != gpuData_.end())
+        it->second.model = glm::mat4(scene::entityTransform(*e).matrix());
+}
+
 void EditorApp::rebuildAllMeshes() {
     gpuData_.clear();
     for (const auto& [id, _] : scene_.entities) rebuildEntityMesh(id);
+}
+
+scene::EntityId EditorApp::addPrimitiveEntity(std::string name, geo::Brush brush, const glm::dvec3& worldPos) {
+    scene::BrushEntity e;
+    e.name = std::move(name);
+    e.brushes = { std::move(brush) };
+    e.transform = scene::Transform::fromTranslation(worldPos);
+    const auto id = scene_.addEntity(std::move(e));
+    entityLayers_[id] = "Default";
+    entityGroups_[id] = "";
+    rebuildEntityMesh(id);
+    selection_.set(id);
+    faceSelection_.clear();
+    vertexSelection_.clear();
+    setStatus(std::format("Added '{}'", scene::entityName(*scene_.getEntity(id))));
+    return id;
+}
+
+glm::dvec3 EditorApp::viewportSpawnPoint(ImVec2 vpPos, ImVec2 vpSz) const {
+    const ImVec2 mouse = ImGui::GetMousePos();
+    const ImVec2 rel = { mouse.x - vpPos.x, mouse.y - vpPos.y };
+    const glm::vec2 ndc = {
+        (rel.x / vpSz.x) * 2.f - 1.f,
+        -((rel.y / vpSz.y) * 2.f - 1.f)
+    };
+
+    const glm::vec3 rayOrigin = camera_.position();
+    const glm::vec3 rayDir = camera_.unproject(ndc, vpSz.x / vpSz.y);
+
+    glm::vec3 spawn = camera_.target;
+    if (std::abs(rayDir.y) > 1e-5f) {
+        const float t = -rayOrigin.y / rayDir.y;
+        if (t > 0.0f) {
+            spawn = rayOrigin + rayDir * t;
+        }
+    }
+
+    if (snapEnabled_) {
+        spawn = snapVec3(spawn, gridSize_);
+    }
+
+    return glm::dvec3(spawn);
+}
+
+void EditorApp::addDraggedBox(const glm::dvec3& a, const glm::dvec3& b, double height) {
+    const double minX = std::min(a.x, b.x);
+    const double maxX = std::max(a.x, b.x);
+    const double minZ = std::min(a.z, b.z);
+    const double maxZ = std::max(a.z, b.z);
+    const double baseY = std::min(a.y, b.y);
+
+    const double minSpan = snapEnabled_ ? static_cast<double>(gridSize_) : 16.0;
+    if ((maxX - minX) < minSpan || (maxZ - minZ) < minSpan) {
+        setStatus("Drag box too small. Increase footprint.");
+        return;
+    }
+
+    const double finalHeight = std::max(height, minSpan);
+    addPrimitiveEntity(
+        "box",
+        geo::makeBox({minX, baseY, minZ}, {maxX, baseY + finalHeight, maxZ}),
+        glm::dvec3(0.0));
+}
+
+void EditorApp::extrudeSelectedFace(double distance) {
+    if (!faceSelection_.valid()) return;
+    if (std::abs(distance) < 1e-4) return;
+
+    auto* entity = scene_.getEntity(faceSelection_.entityId);
+    auto* be = entity ? std::get_if<scene::BrushEntity>(entity) : nullptr;
+    if (!be || faceSelection_.brushIdx >= be->brushes.size()) return;
+
+    const auto& brush = be->brushes[faceSelection_.brushIdx];
+    if (faceSelection_.faceIdx >= brush.faces.size()) return;
+
+    const auto& localPoly = brush.facePolygon(faceSelection_.faceIdx);
+    if (localPoly.size() < 3) return;
+
+    std::vector<glm::dvec3> base;
+    base.reserve(localPoly.size());
+    for (const auto& p : localPoly) {
+        base.push_back(be->transform.transformPoint(p));
+    }
+
+    const glm::dvec3 normal = glm::normalize(
+        be->transform.transformNormal(brush.faces[faceSelection_.faceIdx].plane.normal));
+    const glm::dvec3 dir = normal * distance;
+
+    std::vector<glm::dvec3> cap;
+    cap.reserve(base.size());
+    for (const auto& p : base) cap.push_back(p + dir);
+
+    geo::Brush extruded;
+    extruded.faces.reserve(base.size() + 2);
+
+    extruded.faces.push_back({ geo::Plane::fromNormalPoint(-normal, base[0]), "default" });
+    extruded.faces.push_back({ geo::Plane::fromNormalPoint( normal, cap[0]),  "default" });
+
+    glm::dvec3 interior{};
+    for (const auto& p : base) interior += p;
+    interior /= static_cast<double>(base.size());
+    interior += dir * 0.5;
+
+    for (std::size_t i = 0; i < base.size(); ++i) {
+        const std::size_t j = (i + 1) % base.size();
+        const glm::dvec3 edge = base[j] - base[i];
+        glm::dvec3 sideN = glm::normalize(glm::cross(edge, normal));
+        geo::Plane side = geo::Plane::fromNormalPoint(sideN, base[i]);
+        if (side.eval(interior) > 0.0) {
+            side = side.flipped();
+        }
+        extruded.faces.push_back({ side, brush.faces[faceSelection_.faceIdx].materialId });
+    }
+
+    scene::BrushEntity e;
+    e.name = "extrude";
+    e.brushes = { std::move(extruded) };
+    auto cmd = std::make_unique<AddBrushEntityCommand>(std::move(e));
+    auto* cmdPtr = cmd.get();
+    commands_.push(std::move(cmd), scene_);
+    if (cmdPtr->addedId != scene::kInvalidEntityId) {
+        entityLayers_[cmdPtr->addedId] = entityLayer(faceSelection_.entityId);
+        entityGroups_[cmdPtr->addedId] = entityGroup(faceSelection_.entityId);
+        rebuildEntityMesh(cmdPtr->addedId);
+        selection_.set(cmdPtr->addedId);
+        faceSelection_.clear();
+        vertexSelection_.clear();
+    }
+    setStatus(std::format("Extruded face by {:.0f}", distance));
+}
+
+void EditorApp::insetSelectedFace(double insetAmount, double depth) {
+    if (!faceSelection_.valid()) return;
+    if (insetAmount <= 0.0 || depth <= 0.0) return;
+
+    auto* entity = scene_.getEntity(faceSelection_.entityId);
+    auto* be = entity ? std::get_if<scene::BrushEntity>(entity) : nullptr;
+    if (!be || faceSelection_.brushIdx >= be->brushes.size()) return;
+
+    const auto& brush = be->brushes[faceSelection_.brushIdx];
+    if (faceSelection_.faceIdx >= brush.faces.size()) return;
+
+    const auto& localPoly = brush.facePolygon(faceSelection_.faceIdx);
+    if (localPoly.size() < 3) return;
+
+    std::vector<glm::dvec3> base;
+    base.reserve(localPoly.size());
+    for (const auto& p : localPoly) base.push_back(be->transform.transformPoint(p));
+
+    glm::dvec3 centroid{};
+    for (const auto& p : base) centroid += p;
+    centroid /= static_cast<double>(base.size());
+
+    double rMax = 0.0;
+    for (const auto& p : base) rMax = std::max(rMax, glm::length(p - centroid));
+    if (rMax < 1e-4) return;
+
+    const double factor = std::clamp(1.0 - (insetAmount / rMax), 0.05, 0.98);
+    std::vector<glm::dvec3> inset;
+    inset.reserve(base.size());
+    for (const auto& p : base) inset.push_back(centroid + (p - centroid) * factor);
+
+    const glm::dvec3 normal = glm::normalize(
+        be->transform.transformNormal(brush.faces[faceSelection_.faceIdx].plane.normal));
+    const glm::dvec3 dir = -normal * depth;
+
+    std::vector<glm::dvec3> cap;
+    cap.reserve(inset.size());
+    for (const auto& p : inset) cap.push_back(p + dir);
+
+    geo::Brush insetBrush;
+    insetBrush.faces.reserve(inset.size() + 2);
+
+    std::vector<geo::Plane> planes;
+    planes.reserve(inset.size() + 2);
+    planes.push_back(geo::Plane::fromNormalPoint( normal, inset[0]));
+    planes.push_back(geo::Plane::fromNormalPoint(-normal, cap[0]));
+    for (std::size_t i = 0; i < inset.size(); ++i) {
+        const std::size_t j = (i + 1) % inset.size();
+        planes.push_back(geo::Plane::fromPoints(inset[i], inset[j], cap[j]));
+    }
+
+    glm::dvec3 interior{};
+    for (const auto& p : inset) interior += p;
+    interior /= static_cast<double>(inset.size());
+    interior += dir * 0.5;
+
+    for (auto& pl : planes) {
+        if (pl.eval(interior) > 0.0) pl = pl.flipped();
+        insetBrush.faces.push_back({pl, brush.faces[faceSelection_.faceIdx].materialId});
+    }
+
+    const auto insetVerts = insetBrush.vertices();
+    if (insetVerts.size() < 4) {
+        setStatus("Inset failed: invalid resulting brush.");
+        return;
+    }
+
+    scene::BrushEntity e;
+    e.name = "inset";
+    e.brushes = { std::move(insetBrush) };
+    auto cmd = std::make_unique<AddBrushEntityCommand>(std::move(e));
+    auto* cmdPtr = cmd.get();
+    commands_.push(std::move(cmd), scene_);
+    if (cmdPtr->addedId != scene::kInvalidEntityId) {
+        entityLayers_[cmdPtr->addedId] = entityLayer(faceSelection_.entityId);
+        entityGroups_[cmdPtr->addedId] = entityGroup(faceSelection_.entityId);
+        rebuildEntityMesh(cmdPtr->addedId);
+        selection_.set(cmdPtr->addedId);
+        faceSelection_.clear();
+        vertexSelection_.clear();
+    }
+    setStatus(std::format("Inset face {:.0f}, depth {:.0f}", insetAmount, depth));
+}
+
+void EditorApp::bridgeSelectedFaces() {
+    if (!faceSelection_.valid() || !bridgeSourceFace_.has_value()) return;
+    const FaceSelection aSel = *bridgeSourceFace_;
+    const FaceSelection bSel = faceSelection_;
+    if (aSel.entityId == bSel.entityId && aSel.brushIdx == bSel.brushIdx && aSel.faceIdx == bSel.faceIdx) {
+        setStatus("Bridge requires two different faces.");
+        return;
+    }
+
+    struct FaceData {
+        std::vector<glm::dvec3> poly;
+        glm::dvec3 normal{};
+        std::string material;
+        scene::EntityId entityId = scene::kInvalidEntityId;
+    };
+
+    auto getFaceData = [&](const FaceSelection& sel) -> std::optional<FaceData> {
+        auto* entity = scene_.getEntity(sel.entityId);
+        auto* be = entity ? std::get_if<scene::BrushEntity>(entity) : nullptr;
+        if (!be || sel.brushIdx >= be->brushes.size()) return std::nullopt;
+        const auto& br = be->brushes[sel.brushIdx];
+        if (sel.faceIdx >= br.faces.size()) return std::nullopt;
+        const auto& local = br.facePolygon(sel.faceIdx);
+        if (local.size() < 3) return std::nullopt;
+        FaceData d;
+        d.entityId = sel.entityId;
+        d.material = br.faces[sel.faceIdx].materialId;
+        d.normal = glm::normalize(be->transform.transformNormal(br.faces[sel.faceIdx].plane.normal));
+        d.poly.reserve(local.size());
+        for (const auto& p : local) d.poly.push_back(be->transform.transformPoint(p));
+        return d;
+    };
+
+    auto a = getFaceData(aSel);
+    auto b = getFaceData(bSel);
+    if (!a || !b) {
+        setStatus("Bridge failed: invalid face selection.");
+        return;
+    }
+    if (a->poly.size() != b->poly.size()) {
+        setStatus("Bridge requires matching face vertex counts.");
+        return;
+    }
+
+    const std::size_t n = a->poly.size();
+    std::vector<glm::dvec3> bMatch(n);
+    double bestErr = std::numeric_limits<double>::max();
+    int bestShift = 0;
+    bool bestReverse = false;
+    for (int rev = 0; rev < 2; ++rev) {
+        for (std::size_t shift = 0; shift < n; ++shift) {
+            double err = 0.0;
+            for (std::size_t i = 0; i < n; ++i) {
+                std::size_t idx = (shift + i) % n;
+                if (rev == 1) idx = (shift + n - i) % n;
+                const glm::dvec3 d = a->poly[i] - b->poly[idx];
+                err += glm::dot(d, d);
+            }
+            if (err < bestErr) {
+                bestErr = err;
+                bestShift = static_cast<int>(shift);
+                bestReverse = (rev == 1);
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < n; ++i) {
+        std::size_t idx = (bestShift + static_cast<int>(i)) % static_cast<int>(n);
+        if (bestReverse) idx = (bestShift + static_cast<int>(n) - static_cast<int>(i)) % static_cast<int>(n);
+        bMatch[i] = b->poly[idx];
+    }
+
+    geo::Brush bridge;
+    bridge.faces.reserve(n + 2);
+
+    std::vector<geo::Plane> planes;
+    planes.reserve(n + 2);
+    planes.push_back(geo::Plane::fromNormalPoint(a->normal, a->poly[0]));
+    planes.push_back(geo::Plane::fromNormalPoint(b->normal, bMatch[0]));
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t j = (i + 1) % n;
+        planes.push_back(geo::Plane::fromPoints(a->poly[i], a->poly[j], bMatch[j]));
+    }
+
+    glm::dvec3 interior{};
+    for (std::size_t i = 0; i < n; ++i) {
+        interior += a->poly[i];
+        interior += bMatch[i];
+    }
+    interior /= static_cast<double>(2 * n);
+
+    for (auto& pl : planes) {
+        if (pl.eval(interior) > 0.0) pl = pl.flipped();
+        bridge.faces.push_back({pl, b->material});
+    }
+
+    const auto bridgeVerts = bridge.vertices();
+    if (bridgeVerts.size() < 4) {
+        setStatus("Bridge failed: generated geometry is degenerate.");
+        return;
+    }
+
+    scene::BrushEntity e;
+    e.name = "bridge";
+    e.brushes = { std::move(bridge) };
+    auto cmd = std::make_unique<AddBrushEntityCommand>(std::move(e));
+    auto* cmdPtr = cmd.get();
+    commands_.push(std::move(cmd), scene_);
+    if (cmdPtr->addedId != scene::kInvalidEntityId) {
+        entityLayers_[cmdPtr->addedId] = entityLayer(bSel.entityId);
+        entityGroups_[cmdPtr->addedId] = entityGroup(bSel.entityId);
+        rebuildEntityMesh(cmdPtr->addedId);
+        selection_.set(cmdPtr->addedId);
+        vertexSelection_.clear();
+    }
+    setStatus("Created bridge brush.");
+}
+
+void EditorApp::registerBridgeFaceSelection(const FaceHit& pick) {
+    FaceSelection next;
+    next.entityId = pick.entityId;
+    next.brushIdx = pick.brushIdx;
+    next.faceIdx = pick.faceIdx;
+
+    if (faceSelection_.valid()) {
+        const bool changed =
+            faceSelection_.entityId != next.entityId ||
+            faceSelection_.brushIdx != next.brushIdx ||
+            faceSelection_.faceIdx != next.faceIdx;
+        if (changed) bridgeSourceFace_ = faceSelection_;
+    }
+    faceSelection_ = next;
+}
+
+std::string EditorApp::entityLayer(scene::EntityId id) {
+    auto it = entityLayers_.find(id);
+    if (it == entityLayers_.end()) {
+        it = entityLayers_.emplace(id, "Default").first;
+    }
+    if (!layerVisibility_.contains(it->second)) layerVisibility_[it->second] = true;
+    if (!layerLocked_.contains(it->second)) layerLocked_[it->second] = false;
+    if (!layerTint_.contains(it->second)) layerTint_[it->second] = {1.f, 1.f, 1.f};
+    return it->second;
+}
+
+std::string EditorApp::entityGroup(scene::EntityId id) {
+    auto it = entityGroups_.find(id);
+    if (it == entityGroups_.end()) {
+        it = entityGroups_.emplace(id, "").first;
+    }
+    return it->second;
+}
+
+bool EditorApp::layerVisible(const std::string& layer) const {
+    if (auto it = layerVisibility_.find(layer); it != layerVisibility_.end()) return it->second;
+    return true;
+}
+
+bool EditorApp::layerLocked(const std::string& layer) const {
+    if (auto it = layerLocked_.find(layer); it != layerLocked_.end()) return it->second;
+    return false;
+}
+
+glm::vec3 EditorApp::layerTint(const std::string& layer) const {
+    if (auto it = layerTint_.find(layer); it != layerTint_.end()) return it->second;
+    return {1.f, 1.f, 1.f};
+}
+
+bool EditorApp::entityVisibleByLayer(scene::EntityId id) const {
+    if (auto it = entityLayers_.find(id); it != entityLayers_.end()) {
+        if (!soloLayer_.empty() && it->second != soloLayer_) return false;
+        return layerVisible(it->second);
+    }
+    return soloLayer_.empty();
+}
+
+bool EditorApp::entityVisibleByGroup(scene::EntityId id) const {
+    if (groupFilter_.empty()) return true;
+    if (auto it = entityGroups_.find(id); it != entityGroups_.end()) {
+        return it->second == groupFilter_;
+    }
+    return false;
+}
+
+bool EditorApp::entityVisibleInEditor(scene::EntityId id) const {
+    if (hiddenEntities_.contains(id)) return false;
+    if (!isolatedEntities_.empty() && !isolatedEntities_.contains(id)) return false;
+    return entityVisibleByLayer(id) && entityVisibleByGroup(id);
+}
+
+bool EditorApp::entityLockedByLayer(scene::EntityId id) const {
+    if (auto it = entityLayers_.find(id); it != entityLayers_.end()) {
+        return layerLocked(it->second);
+    }
+    return false;
+}
+
+void EditorApp::reconcileEditorState() {
+    std::unordered_set<scene::EntityId> liveIds;
+    liveIds.reserve(scene_.entities.size());
+    for (const auto& [id, _] : scene_.entities) liveIds.insert(id);
+
+    auto pruneMap = [&](auto& map) {
+        for (auto it = map.begin(); it != map.end();) {
+            if (!liveIds.contains(it->first)) it = map.erase(it);
+            else ++it;
+        }
+    };
+    pruneMap(entityLayers_);
+    pruneMap(entityGroups_);
+    pruneMap(gpuData_);
+    for (auto it = hiddenEntities_.begin(); it != hiddenEntities_.end();) {
+        if (!liveIds.contains(*it)) it = hiddenEntities_.erase(it);
+        else ++it;
+    }
+    for (auto it = isolatedEntities_.begin(); it != isolatedEntities_.end();) {
+        if (!liveIds.contains(*it)) it = isolatedEntities_.erase(it);
+        else ++it;
+    }
+
+    for (const auto& [id, _] : scene_.entities) {
+        (void)entityLayer(id);
+        (void)entityGroup(id);
+    }
+
+    for (auto it = selection_.ids.begin(); it != selection_.ids.end();) {
+        if (!liveIds.contains(*it) || !entityVisibleInEditor(*it)) it = selection_.ids.erase(it);
+        else ++it;
+    }
+
+    if (faceSelection_.valid() && !liveIds.contains(faceSelection_.entityId)) faceSelection_.clear();
+    if (vertexSelection_.valid() && !liveIds.contains(vertexSelection_.entityId)) vertexSelection_.clear();
+    if (bridgeSourceFace_.has_value() && !liveIds.contains(bridgeSourceFace_->entityId)) bridgeSourceFace_.reset();
+
+    if (!selection_.empty() && entityLockedByLayer(selection_.primary())) {
+        faceSelection_.clear();
+        vertexSelection_.clear();
+    }
 }
 
 // ─── Run loop ─────────────────────────────────────────────────────────────────
@@ -169,10 +710,14 @@ void EditorApp::run() {
 // ─── Frame ────────────────────────────────────────────────────────────────────
 
 void EditorApp::drawFrame() {
+    reconcileEditorState();
+
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
+#ifdef IMGUI_HAS_DOCK
     ImGui::SetNextWindowViewport(vp->ID);
+#endif
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.f,0.f});
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
     ImGui::Begin("##host", nullptr,
@@ -182,15 +727,20 @@ void EditorApp::drawFrame() {
         ImGuiWindowFlags_MenuBar);
     ImGui::PopStyleVar(2);
     drawMainMenuBar();
+#ifdef IMGUI_HAS_DOCK
     const ImGuiID dock = ImGui::GetID("ForgeDock");
+    dockspaceId_ = dock;
     ImGui::DockSpace(dock, {0.f,0.f});
     if (!layoutReady_) setupDefaultDockLayout(dock);
+#else
+    dockspaceId_ = 0;
+#endif
     ImGui::End();
 
     drawToolbar();
     drawViewport();
     drawSceneTree();
-    drawProperties();
+    drawInspector();
     drawStatusBar();
     if (showMaterialEditor_) materialEditor_.draw();
     if (showUndoHistory_)     drawUndoHistory();
@@ -200,12 +750,16 @@ void EditorApp::drawFrame() {
     if (showScriptConsole_)   drawScriptConsole();
     if (showBloomSettings_)   drawBloomSettings();
     if (showAudioSettings_)   drawAudioSettings();
-    if (showScriptConsole_)   drawScriptConsole();
 }
 
 // ─── Dock layout ─────────────────────────────────────────────────────────────
 
 void EditorApp::setupDefaultDockLayout(ImGuiID dock) {
+#ifndef IMGUI_HAS_DOCK
+    (void)dock;
+    layoutReady_ = true;
+    return;
+#else
     ImGui::DockBuilderRemoveNode(dock);
     ImGui::DockBuilderAddNode(dock, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dock, ImGui::GetMainViewport()->WorkSize);
@@ -221,6 +775,7 @@ void EditorApp::setupDefaultDockLayout(ImGuiID dock) {
     ImGui::DockBuilderDockWindow("Properties", rbot);
     ImGui::DockBuilderFinish(dock);
     layoutReady_ = true;
+#endif
 }
 
 // ─── Menu bar ─────────────────────────────────────────────────────────────────
@@ -246,22 +801,58 @@ void EditorApp::drawMainMenuBar() {
 
     if (ImGui::BeginMenu("Edit")) {
         if (ImGui::MenuItem("Undo","Ctrl+Z",false,commands_.canUndo())) {
-            commands_.undo(scene_); rebuildAllMeshes();
+            commands_.undo(scene_); rebuildAllMeshes(); reconcileEditorState();
         }
         if (ImGui::MenuItem("Redo","Ctrl+Y",false,commands_.canRedo())) {
-            commands_.redo(scene_); rebuildAllMeshes();
+            commands_.redo(scene_); rebuildAllMeshes(); reconcileEditorState();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Select All Visible", "Ctrl+A")) {
+            selection_.clear();
+            for (const auto& [id, _] : scene_.entities) {
+                if (entityVisibleInEditor(id) && !entityLockedByLayer(id)) selection_.add(id);
+            }
+            if (selection_.empty()) setStatus("No selectable entities in current filters.");
+        }
+        if (ImGui::MenuItem("Select Same Group", "Ctrl+Shift+A", false, !selection_.empty())) {
+            const std::string group = entityGroup(selection_.primary());
+            selection_.clear();
+            for (const auto& [id, _] : scene_.entities) {
+                if (!entityVisibleInEditor(id) || entityLockedByLayer(id)) continue;
+                if (entityGroup(id) == group) selection_.add(id);
+            }
+            if (selection_.empty()) setStatus("No matching group entities found.");
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Delete Selected","Del",false,!selection_.empty())) {
-            commands_.push(std::make_unique<DeleteEntityCommand>(selection_.primary()), scene_);
-            gpuData_.erase(selection_.primary()); selection_.clear(); faceSelection_.clear();
+            const std::vector<scene::EntityId> toDelete = selection_.ids;
+            commands_.push(std::make_unique<BatchDeleteCommand>(toDelete), scene_);
+            for (auto id : toDelete) gpuData_.erase(id);
+            selection_.clear(); faceSelection_.clear();
+            vertexSelection_.clear();
+            bridgeSourceFace_.reset();
+            reconcileEditorState();
         }
         ImGui::Separator();
         if (ImGui::MenuItem("CSG Subtract (selection=cutter)",nullptr,false,!selection_.empty()))
             applyCSGSubtract();
+        if (ImGui::MenuItem("CSG Union (select 2 entities)", nullptr, false, selection_.ids.size() == 2))
+            applyCSGUnion();
+        if (ImGui::MenuItem("CSG Intersect (select 2 entities)", nullptr, false, selection_.ids.size() == 2))
+            applyCSGIntersect();
+        if (ImGui::MenuItem("CSG XOR (select 2 entities)", nullptr, false, selection_.ids.size() == 2))
+            applyCSGXor();
         ImGui::Separator();
         if (ImGui::MenuItem("Duplicate Selected", "Ctrl+D", false, !selection_.empty()))
             duplicateSelection();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Hide Selected", nullptr, false, !selection_.empty()))
+            hideSelection();
+        if (ImGui::MenuItem("Isolate Selected", nullptr, false, !selection_.empty()))
+            isolateSelection();
+        if (ImGui::MenuItem("Show All Hidden / Clear Isolation", nullptr, false,
+            !hiddenEntities_.empty() || !isolatedEntities_.empty()))
+            clearHiddenIsolation();
         ImGui::Separator();
         if (ImGui::MenuItem("Run Validation"))
             runValidation();
@@ -298,6 +889,11 @@ void EditorApp::drawMainMenuBar() {
         ImGui::MenuItem("Script Console",nullptr, &showScriptConsole_);
         ImGui::Separator();
         if (ImGui::MenuItem("Frame All","F")) camera_.frameAABB(scene_.worldBounds());
+        ImGui::MenuItem("Orthographic Edit Mode", nullptr, &orthoEditMode_);
+        if (ImGui::MenuItem("Hide Selected", nullptr, false, !selection_.empty())) hideSelection();
+        if (ImGui::MenuItem("Isolate Selected", nullptr, false, !selection_.empty())) isolateSelection();
+        if (ImGui::MenuItem("Show All Hidden / Clear Isolation", nullptr, false,
+            !hiddenEntities_.empty() || !isolatedEntities_.empty())) clearHiddenIsolation();
         ImGui::Separator();
         ImGui::MenuItem("Material Editor", nullptr, &showMaterialEditor_);
         ImGui::MenuItem("Undo History",     nullptr, &showUndoHistory_);
@@ -305,9 +901,8 @@ void EditorApp::drawMainMenuBar() {
         ImGui::MenuItem("Validation",       nullptr, &showValidation_);
         ImGui::MenuItem("Script Console",  nullptr, &showScriptConsole_);
         if (ImGui::MenuItem("Frame Selected",nullptr,false,!selection_.empty())) {
-            if (auto* e = scene_.getEntity(selection_.primary()))
-                if (auto* be = std::get_if<scene::BrushEntity>(e))
-                    camera_.frameAABB(be->worldBounds());
+            const geo::AABB combined = selection_.combinedBounds(scene_);
+            if (combined.isValid()) camera_.frameAABB(combined);
         }
         ImGui::EndMenu();
     }
@@ -324,32 +919,21 @@ void EditorApp::drawMainMenuBar() {
 
 void EditorApp::drawAddPrimitivesMenu() {
     static int pSides = 6, ySides = 4;
-
-    auto add = [&](std::string name, geo::Brush b) {
-        scene::BrushEntity e;
-        e.name    = std::move(name);
-        e.brushes = { std::move(b) };
-        e.transform = scene::Transform::fromTranslation(glm::dvec3(camera_.target));
-        auto id = scene_.addEntity(std::move(e));
-        rebuildEntityMesh(id);
-        selection_.set(id);
-        faceSelection_.clear();
-        setStatus(std::format("Added '{}'", scene::entityName(*scene_.getEntity(id))));
-    };
+    const glm::dvec3 spawn = glm::dvec3(camera_.target);
 
     if (ImGui::MenuItem("Box (64³)"))
-        add("box",    geo::makeBox({-32,0,-32},{32,64,32}));
+        addPrimitiveEntity("box", geo::makeBox({-32,0,-32},{32,64,32}), spawn);
     if (ImGui::MenuItem("Wedge (64³)"))
-        add("wedge",  geo::makeWedge({-32,0,-32},{32,64,32}));
+        addPrimitiveEntity("wedge", geo::makeWedge({-32,0,-32},{32,64,32}), spawn);
     ImGui::Separator();
     ImGui::SetNextItemWidth(70); ImGui::InputInt("##ps",&pSides); pSides=std::clamp(pSides,3,32);
     ImGui::SameLine();
     if (ImGui::MenuItem(std::format("{}-Prism",pSides).c_str()))
-        add(std::format("{}_prism",pSides), geo::makePrism({0,0,0},32.,64.,pSides));
+        addPrimitiveEntity(std::format("{}_prism",pSides), geo::makePrism({0,0,0},32.,64.,pSides), spawn);
     ImGui::SetNextItemWidth(70); ImGui::InputInt("##ys",&ySides); ySides=std::clamp(ySides,3,32);
     ImGui::SameLine();
     if (ImGui::MenuItem(std::format("{}-Pyramid",ySides).c_str()))
-        add(std::format("{}_pyramid",ySides), geo::makePyramid({0,0,0},32.,64.,ySides));
+        addPrimitiveEntity(std::format("{}_pyramid",ySides), geo::makePyramid({0,0,0},32.,64.,ySides), spawn);
 }
 
 // ─── Toolbar ──────────────────────────────────────────────────────────────────
@@ -369,6 +953,8 @@ void EditorApp::drawToolbar() {
                 faceSelection_.clear();
             if (t != ActiveTool::VertexSelect)
                 vertexSelection_.clear();
+            if (t != ActiveTool::FaceSelect && t != ActiveTool::FaceMove)
+                bridgeSourceFace_.reset();
         }
         if (on) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tip);
@@ -381,7 +967,7 @@ void EditorApp::drawToolbar() {
     btn("ROT",  ActiveTool::Rotate,     "Rotate entity (E)");
     btn("SCL",  ActiveTool::Scale,      "Scale entity (R)");
 
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+    drawVertexSeparator();
 
     // Face / geometry tools
     btn("FSEL", ActiveTool::FaceSelect, "Select face (T)");
@@ -389,12 +975,13 @@ void EditorApp::drawToolbar() {
     btn("CLIP", ActiveTool::Clip,       "Clip brush with plane (C)");
     btn("PAINT",ActiveTool::Paint,      "Paint material (P)");
     btn("VTEX", ActiveTool::VertexSelect,"Select vertex (V)");
+    btn("BCR",  ActiveTool::BoxCreate,  "Box create drag tool");
 
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+    drawVertexSeparator();
     ImGui::Checkbox("Grid",&showGrid_); ImGui::SameLine();
     ImGui::Checkbox("Wire",&wireframe_); ImGui::SameLine();
 
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+    drawVertexSeparator();
     if (ImGui::Button(viewportLayout_ == ViewportLayout::Single ? "[1]" : "[4]", {30.f, 22.f})) {
         viewportLayout_ = (viewportLayout_ == ViewportLayout::Single)
                         ? ViewportLayout::Quad : ViewportLayout::Single;
@@ -403,7 +990,7 @@ void EditorApp::drawToolbar() {
     ImGui::SameLine();
 
     // Grid snap controls
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+    drawVertexSeparator();
     ImGui::Checkbox("Snap", &snapEnabled_); ImGui::SameLine();
     ImGui::SetNextItemWidth(56.f);
     if (ImGui::BeginCombo("##grid", gridLabel(gridSize_).c_str())) {
@@ -424,7 +1011,7 @@ void EditorApp::drawToolbar() {
 
     // Play / Stop
     ImGui::SameLine();
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
+    drawVertexSeparator();
     ImGui::PushStyleColor(ImGuiCol_Button, {0.15f, 0.55f, 0.15f, 1.f});
     if (ImGui::Button(playMode_ ? "  STOP  " : "  PLAY  ", {80.f, 22.f})) {
         if (!playMode_) enterPlayMode();
@@ -438,11 +1025,95 @@ void EditorApp::drawToolbar() {
     // Keyboard shortcuts
     const auto& k = window_.input().keys;
     if (!ImGui::GetIO().WantCaptureKeyboard) {
+        const bool ctrl = ImGui::GetIO().KeyCtrl;
+        const bool shift = ImGui::GetIO().KeyShift;
         if (k.f1) wireframe_ = !wireframe_;
         if (k.q)  activeTool_ = ActiveTool::Select;
         if (k.w)  activeTool_ = ActiveTool::Move;
         if (k.e)  activeTool_ = ActiveTool::Rotate;
         if (k.r)  activeTool_ = ActiveTool::Scale;
+        if (k.t)  activeTool_ = ActiveTool::FaceSelect;
+        if (k.y)  activeTool_ = ActiveTool::FaceMove;
+        if (k.c)  activeTool_ = ActiveTool::Clip;
+        if (k.p)  activeTool_ = ActiveTool::Paint;
+        if (k.v)  activeTool_ = ActiveTool::VertexSelect;
+        if (ctrl && k.a && !shift) {
+            selection_.clear();
+            for (const auto& [id, _] : scene_.entities) {
+                if (entityVisibleInEditor(id) && !entityLockedByLayer(id)) selection_.add(id);
+            }
+        }
+        if (ctrl && shift && k.a && !selection_.empty()) {
+            const std::string group = entityGroup(selection_.primary());
+            selection_.clear();
+            for (const auto& [id, _] : scene_.entities) {
+                if (!entityVisibleInEditor(id) || entityLockedByLayer(id)) continue;
+                if (entityGroup(id) == group) selection_.add(id);
+            }
+        }
+        // F — frame selected (or all if empty)
+        if (ImGui::IsKeyPressed(ImGuiKey_F)) {
+            if (!selection_.empty()) {
+                geo::AABB combined;
+                for (auto id : selection_.ids)
+                    if (auto* e = scene_.getEntity(id))
+                        if (auto* be = std::get_if<scene::BrushEntity>(e))
+                            combined.expand(be->worldBounds());
+                if (combined.isValid()) camera_.frameAABB(combined);
+            } else {
+                camera_.frameAABB(scene_.worldBounds());
+            }
+        }
+        // Ctrl+Z — undo
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z) && !shift) {
+            commands_.undo(scene_); rebuildAllMeshes(); reconcileEditorState();
+        }
+        // Ctrl+Y — redo
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y)) {
+            commands_.redo(scene_); rebuildAllMeshes(); reconcileEditorState();
+        }
+        // Ctrl+D — duplicate
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_D) && !selection_.empty())
+            duplicateSelection();
+        // Arrow keys — nudge selection in world space (TrenchBroom-style keyboard move)
+        if (!selection_.empty()) {
+            const double step = static_cast<double>(gridSize_) * (shift ? 10.0 : 1.0);
+            glm::dvec3 delta{0.0, 0.0, 0.0};
+            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  delta.x -= step;
+            if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) delta.x += step;
+            if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    delta.z -= step;
+            if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  delta.z += step;
+            if (ImGui::IsKeyPressed(ImGuiKey_PageUp))     delta.y += step;
+            if (ImGui::IsKeyPressed(ImGuiKey_PageDown))   delta.y -= step;
+            if (delta != glm::dvec3{0.0, 0.0, 0.0}) {
+                nudgeSelection(delta);
+            }
+        }
+        // F2 — begin inline rename of primary selected entity
+        if (ImGui::IsKeyPressed(ImGuiKey_F2) && !selection_.empty()) {
+            renamingId_ = selection_.primary();
+            if (auto* e = scene_.getEntity(renamingId_))
+                std::snprintf(treeRenameBuffer_, sizeof(treeRenameBuffer_),
+                              "%s", scene::entityName(*e).c_str());
+        }
+        // Delete — batch-delete all selected entities
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete) && !selection_.empty()) {
+            const std::vector<scene::EntityId> toDelete = selection_.ids;
+            commands_.push(std::make_unique<BatchDeleteCommand>(toDelete), scene_);
+            for (auto id : toDelete) gpuData_.erase(id);
+            selection_.clear(); faceSelection_.clear();
+            vertexSelection_.clear();
+            bridgeSourceFace_.reset();
+            reconcileEditorState();
+        }
+        // Escape — cancel active box-create drag
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            if (boxCreate_.draggingFootprint || boxCreate_.adjustingHeight) {
+                boxCreate_.draggingFootprint = false;
+                boxCreate_.adjustingHeight   = false;
+                setStatus("Box create cancelled.");
+            }
+        }
     }
     ImGui::End();
 }
@@ -454,8 +1125,28 @@ void EditorApp::drawViewport() {
         drawQuadViewport();
         return;
     }
+
+    ImGuiWindowFlags viewportFlags = 0;
+#ifdef IMGUI_HAS_DOCK
+    if (dockspaceId_ != 0) {
+        ImGui::SetNextWindowDockID(dockspaceId_, ImGuiCond_Always);
+        viewportFlags |= ImGuiWindowFlags_NoSavedSettings;
+    }
+#endif
+#ifndef IMGUI_HAS_DOCK
+    const ImGuiViewport* mainVp = ImGui::GetMainViewport();
+    const ImVec2 pos = { mainVp->WorkPos.x + 250.f, mainVp->WorkPos.y + 56.f };
+    const ImVec2 size = {
+        std::max(640.0f, mainVp->WorkSize.x - 560.f),
+        std::max(420.0f, mainVp->WorkSize.y - 120.f)
+    };
+    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    viewportFlags |= ImGuiWindowFlags_NoSavedSettings;
+#endif
+
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.f,0.f});
-    ImGui::Begin("Viewport");
+    ImGui::Begin("Viewport", nullptr, viewportFlags);
     ImGui::PopStyleVar();
 
     const ImVec2 sz = ImGui::GetContentRegionAvail();
@@ -467,6 +1158,19 @@ void EditorApp::drawViewport() {
     viewportFbo_.bind();
     glClearColor(0.10f,0.10f,0.12f,1.f);
     glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+
+    const float aspect = sz.x / sz.y;
+    gfx::RenderFrame frame;
+    frame.view      = camera_.viewMatrix();
+    frame.proj      = camera_.projMatrix(aspect);
+    frame.cameraPos = camera_.position();
+    frame.wireframe  = wireframe_;
+    frame.sunDirection = { -0.5f,-1.f,-0.5f };
+    frame.sunColor     = {  1.f, 0.95f, 0.8f };
+    frame.sunIntensity = 1.2f;
+    frame.ambientColor = { 0.06f, 0.06f, 0.08f };
+    frame.fogColor   = scene_.fog.color;
+    frame.fogDensity = showFog_ ? scene_.fog.density : 0.f;
 
     // Shadow pass (before skybox/scene)
     if (showShadows_ && shadowMap_.valid()) {
@@ -484,6 +1188,8 @@ void EditorApp::drawViewport() {
         frame.shadowsEnabled   = true;
         frame.lightSpaceMatrix = lvp;
         frame.shadowMapUnit    = 1;
+        // Rebind the viewport FBO — endPass() unbinds it back to default
+        viewportFbo_.bind();
         glViewport(0, 0, (int)sz.x, (int)sz.y);
     }
 
@@ -492,15 +1198,6 @@ void EditorApp::drawViewport() {
         const glm::mat4 invVP = glm::inverse(frame.proj * frame.view);
         skyboxRenderer_.draw(invVP);
     }
-
-    const float aspect = sz.x / sz.y;
-    gfx::RenderFrame frame;
-    frame.view      = camera_.viewMatrix();
-    frame.proj      = camera_.projMatrix(aspect);
-    frame.cameraPos = camera_.position();
-    frame.wireframe  = wireframe_;
-    frame.fogColor   = scene_.fog.color;
-    frame.fogDensity = showFog_ ? scene_.fog.density : 0.f;
 
     // Collect point lights from scene
     {
@@ -518,24 +1215,25 @@ void EditorApp::drawViewport() {
 
     renderer_.beginFrame(frame);
     for (const auto& [id, data] : gpuData_) {
+        if (!entityVisibleInEditor(id)) continue;
         const bool sel = selection_.contains(id);
+        const glm::vec3 tint = layerTint(entityLayer(id));
         for (const auto& sub : data.mesh.submeshes) {
             glm::vec3 col = materialColour(sub.materialId());
+            col *= tint;
             if (sel) col = glm::mix(col, glm::vec3(0.3f,0.65f,1.f), 0.4f);
-            const uint32_t texId = textureCache_.load(sub.materialId());
-            renderer_.submit({ &sub, data.model, col, texId });
+            renderer_.submit({
+                .mesh = &sub,
+                .modelMatrix = data.model,
+                .material = makeEditorMaterial(materialLibrary_, sub.materialId(), col),
+            });
         }
     }
-    renderer_.endFrame();
-    // Draw MeshEntities
     drawMeshEntities(frame);
+    renderer_.endFrame();
 
     if (showGrid_ && gridRenderer_.valid())
         gridRenderer_.draw(frame.view, frame.proj, camera_.nearZ, camera_.farZ);
-
-    // Bloom post-process (modifies viewportFbo_ in-place)
-    if (bloomEnabled_ && bloomRenderer_.valid())
-        bloomRenderer_.apply(viewportFbo_, (int)sz.x, (int)sz.y);
 
     viewportFbo_.unbind();
     glViewport(0, 0, window_.width(), window_.height());
@@ -549,14 +1247,61 @@ void EditorApp::drawViewport() {
     }
 
     // Apply bloom post-process (modifies nothing; returns composited texture)
-    const uint32_t displayTex = (showBloom_ && bloomRenderer_.valid())
+    const uint32_t displayTex = (bloomEnabled_ && bloomRenderer_.valid())
         ? bloomRenderer_.apply(viewportFbo_, (int)sz.x, (int)sz.y)
         : viewportFbo_.colorTexture;
 
     const ImVec2 vpPos = ImGui::GetCursorScreenPos();
-    ImGui::Image(
-        reinterpret_cast<ImTextureID>(static_cast<intptr_t>(displayTex)),
-        sz, {0.f,1.f}, {1.f,0.f});
+    ImGui::Image(toImTextureID(displayTex), sz, {0.f,1.f}, {1.f,0.f});
+
+    // TrenchBroom-style quick creation at cursor: Ctrl + Right Click
+    if (ImGui::IsItemHovered() && ImGui::GetIO().KeyCtrl &&
+        ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        ImGui::OpenPopup("ViewportCreatePopup");
+    }
+
+    if (ImGui::BeginPopup("ViewportCreatePopup")) {
+        static int popupPrismSides = 6;
+        static int popupPyramidSides = 4;
+        const glm::dvec3 spawn = viewportSpawnPoint(vpPos, sz);
+
+        ImGui::TextDisabled("Create at cursor (snapped to grid)");
+        ImGui::Separator();
+
+        if (ImGui::MenuItem("Box (64^3)")) {
+            addPrimitiveEntity("box", geo::makeBox({-32,0,-32},{32,64,32}), spawn);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::MenuItem("Wedge (64^3)")) {
+            addPrimitiveEntity("wedge", geo::makeWedge({-32,0,-32},{32,64,32}), spawn);
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(80.f);
+        ImGui::InputInt("Prism sides", &popupPrismSides);
+        popupPrismSides = std::clamp(popupPrismSides, 3, 32);
+        if (ImGui::MenuItem(std::format("Create {}-Prism", popupPrismSides).c_str())) {
+            addPrimitiveEntity(
+                std::format("{}_prism", popupPrismSides),
+                geo::makePrism({0,0,0}, 32.0, 64.0, popupPrismSides),
+                spawn);
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SetNextItemWidth(80.f);
+        ImGui::InputInt("Pyramid sides", &popupPyramidSides);
+        popupPyramidSides = std::clamp(popupPyramidSides, 3, 32);
+        if (ImGui::MenuItem(std::format("Create {}-Pyramid", popupPyramidSides).c_str())) {
+            addPrimitiveEntity(
+                std::format("{}_pyramid", popupPyramidSides),
+                geo::makePyramid({0,0,0}, 32.0, 64.0, popupPyramidSides),
+                spawn);
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
 
     // ── ImGui overlays drawn on top of the image ──────────────────────────────
     const glm::mat4 vp = frame.proj * frame.view;
@@ -566,13 +1311,18 @@ void EditorApp::drawViewport() {
         drawVertexOverlay(vpPos, sz, vp);
     if (activeTool_ == ActiveTool::Clip && !selection_.empty())
         drawClipPreview(vpPos, sz, vp);
-
-    // ── Mouse input ───────────────────────────────────────────────────────────
-    if (ImGui::IsItemHovered())
-        handleViewportMouse(vpPos, sz);
+    if (activeTool_ == ActiveTool::BoxCreate)
+        drawBoxCreatePreview(vpPos, sz, vp);
+    if (activeTool_ == ActiveTool::Select)
+        drawMarqueePreview(vpPos);
 
     // ── Gizmo ────────────────────────────────────────────────────────────────
     drawGizmo(vpPos, sz);
+
+    // ── Mouse input ───────────────────────────────────────────────────────────
+    // Run after drawGizmo() so ImGuizmo hover/using state is current for this frame.
+    if (ImGui::IsItemHovered())
+        handleViewportMouse(vpPos, sz);
 
     ImGui::End();
 }
@@ -657,12 +1407,194 @@ void EditorApp::drawClipPreview(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
         dl->AddLine(pts[i], pts[(i+1)%4], IM_COL32(255,160,50,200), 1.5f);
 }
 
+void EditorApp::drawBoxCreatePreview(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
+    if (!boxCreate_.draggingFootprint && !boxCreate_.adjustingHeight) return;
+
+    const double minX = std::min(boxCreate_.start.x, boxCreate_.end.x);
+    const double maxX = std::max(boxCreate_.start.x, boxCreate_.end.x);
+    const double minZ = std::min(boxCreate_.start.z, boxCreate_.end.z);
+    const double maxZ = std::max(boxCreate_.start.z, boxCreate_.end.z);
+    const double baseY = std::min(boxCreate_.start.y, boxCreate_.end.y);
+    const double height = std::max(
+        boxCreate_.height,
+        snapEnabled_ ? static_cast<double>(gridSize_) : 8.0);
+    const double topY = baseY + height;
+
+    const std::array<glm::vec3, 8> corners = {{
+        {static_cast<float>(minX), static_cast<float>(baseY), static_cast<float>(minZ)},
+        {static_cast<float>(maxX), static_cast<float>(baseY), static_cast<float>(minZ)},
+        {static_cast<float>(maxX), static_cast<float>(baseY), static_cast<float>(maxZ)},
+        {static_cast<float>(minX), static_cast<float>(baseY), static_cast<float>(maxZ)},
+        {static_cast<float>(minX), static_cast<float>(topY),  static_cast<float>(minZ)},
+        {static_cast<float>(maxX), static_cast<float>(topY),  static_cast<float>(minZ)},
+        {static_cast<float>(maxX), static_cast<float>(topY),  static_cast<float>(maxZ)},
+        {static_cast<float>(minX), static_cast<float>(topY),  static_cast<float>(maxZ)},
+    }};
+
+    std::array<ImVec2, 8> pts;
+    for (int i = 0; i < 8; ++i) pts[i] = w2s(corners[i], vp, pos, sz);
+
+    auto* dl = ImGui::GetWindowDrawList();
+    const ImU32 line = IM_COL32(80, 210, 255, 245);
+    const ImU32 fill = IM_COL32(80, 210, 255, 35);
+    dl->AddQuadFilled(pts[0], pts[1], pts[2], pts[3], fill);
+    dl->AddQuadFilled(pts[4], pts[5], pts[6], pts[7], fill);
+    dl->AddLine(pts[0], pts[1], line, 2.f); dl->AddLine(pts[1], pts[2], line, 2.f);
+    dl->AddLine(pts[2], pts[3], line, 2.f); dl->AddLine(pts[3], pts[0], line, 2.f);
+    dl->AddLine(pts[4], pts[5], line, 2.f); dl->AddLine(pts[5], pts[6], line, 2.f);
+    dl->AddLine(pts[6], pts[7], line, 2.f); dl->AddLine(pts[7], pts[4], line, 2.f);
+    dl->AddLine(pts[0], pts[4], line, 2.f); dl->AddLine(pts[1], pts[5], line, 2.f);
+    dl->AddLine(pts[2], pts[6], line, 2.f); dl->AddLine(pts[3], pts[7], line, 2.f);
+
+    // Dimension readout overlay
+    const float ww = static_cast<float>(maxX - minX);
+    const float dw = static_cast<float>(maxZ - minZ);
+    const float hw = static_cast<float>(height);
+    const std::string dimText = std::format("{:.0f} \xc3\x97 {:.0f} \xc3\x97 {:.0f}", ww, dw, hw);
+    const glm::vec3 topCenter{
+        static_cast<float>((minX + maxX) * 0.5),
+        static_cast<float>(topY),
+        static_cast<float>((minZ + maxZ) * 0.5)
+    };
+    const ImVec2 labelPt = w2s(topCenter, vp, pos, sz);
+    dl->AddText({labelPt.x + 6.f, labelPt.y - 16.f},
+                IM_COL32(255, 255, 180, 240), dimText.c_str());
+}
+
+void EditorApp::drawMarqueePreview(ImVec2 pos) {
+    if (!marquee_.dragging) return;
+    const ImVec2 a = marquee_.start;
+    const ImVec2 b = marquee_.end;
+    const ImVec2 minP{std::min(a.x, b.x), std::min(a.y, b.y)};
+    const ImVec2 maxP{std::max(a.x, b.x), std::max(a.y, b.y)};
+    const bool crossing = (b.x < a.x);
+
+    auto* dl = ImGui::GetWindowDrawList();
+    (void)pos;
+    const ImU32 fill = crossing ? IM_COL32(255, 170, 80, 35) : IM_COL32(80, 170, 255, 35);
+    const ImU32 line = crossing ? IM_COL32(255, 170, 80, 220) : IM_COL32(80, 170, 255, 220);
+    dl->AddRectFilled(minP, maxP, fill);
+    dl->AddRect(minP, maxP, line, 0.f, 0, 1.8f);
+    dl->AddText(
+        {minP.x + 6.f, minP.y + 4.f},
+        line,
+        crossing ? "Crossing" : "Window");
+}
+
 // ─── Viewport mouse ──────────────────────────────────────────────────────────
 
 void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
     const auto& m = window_.input().mouse;
+    const auto& io = ImGui::GetIO();
     const bool gizmoOver = ImGuizmo::IsUsing() || ImGuizmo::IsOver();
     const float aspect   = vpSz.x / vpSz.y;
+
+    auto pickGroundPoint = [&]() -> std::optional<glm::dvec3> {
+        const ImVec2 rel = { ImGui::GetMousePos().x - vpPos.x,
+                             ImGui::GetMousePos().y - vpPos.y };
+        const glm::vec2 ndc = {
+             (rel.x / vpSz.x) * 2.f - 1.f,
+            -((rel.y / vpSz.y) * 2.f - 1.f)
+        };
+        const glm::dvec3 rayOrigin = glm::dvec3(camera_.position());
+        const glm::dvec3 rayDir = glm::dvec3(camera_.unproject(ndc, aspect));
+        const double dy = rayDir.y;
+        if (std::abs(dy) < 1e-6) return std::nullopt;
+        const double t = -rayOrigin.y / dy;
+        if (t <= 0.0) return std::nullopt;
+        return rayOrigin + rayDir * t;
+    };
+
+    auto runMarqueeSelection = [&]() {
+        const ImVec2 minP{std::min(marquee_.start.x, marquee_.end.x), std::min(marquee_.start.y, marquee_.end.y)};
+        const ImVec2 maxP{std::max(marquee_.start.x, marquee_.end.x), std::max(marquee_.start.y, marquee_.end.y)};
+        const bool crossing = marquee_.end.x < marquee_.start.x;
+        if ((maxP.x - minP.x) < 2.f || (maxP.y - minP.y) < 2.f) return;
+
+        const bool append = io.KeyShift;
+        if (!append) {
+            selection_.clear();
+            faceSelection_.clear();
+            vertexSelection_.clear();
+        }
+
+        const glm::mat4 vp = camera_.projMatrix(aspect) * camera_.viewMatrix();
+
+        auto projectPoint = [&](const glm::dvec3& worldPos, ImVec2& out)->bool {
+            const glm::vec4 clip = vp * glm::vec4(glm::vec3(worldPos), 1.f);
+            if (std::abs(clip.w) < 1e-5f) return false;
+            const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.z < -1.f || ndc.z > 1.f) return false;
+            out = {
+                vpPos.x + (ndc.x * 0.5f + 0.5f) * vpSz.x,
+                vpPos.y + (-ndc.y * 0.5f + 0.5f) * vpSz.y
+            };
+            return true;
+        };
+
+        for (const auto& [id, entity] : scene_.entities) {
+            if (!entityVisibleInEditor(id) || entityLockedByLayer(id)) continue;
+
+            geo::AABB worldBounds;
+            bool hasBounds = false;
+            if (const auto* be = std::get_if<scene::BrushEntity>(&entity)) {
+                const geo::AABB wb = be->worldBounds();
+                if (!wb.isValid()) continue;
+                worldBounds = wb;
+                hasBounds = true;
+            } else if (const auto* pe = std::get_if<scene::PointEntity>(&entity)) {
+                worldBounds.expand(pe->transform.translation);
+                hasBounds = true;
+            } else if (const auto* me = std::get_if<scene::MeshEntity>(&entity)) {
+                worldBounds.expand(me->transform.translation);
+                hasBounds = true;
+            }
+            if (!hasBounds || !worldBounds.isValid()) continue;
+
+            ImVec2 entMin{std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+            ImVec2 entMax{std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+            bool anyProjected = false;
+
+            const std::array<glm::dvec3, 8> corners = {{
+                {worldBounds.mins.x, worldBounds.mins.y, worldBounds.mins.z},
+                {worldBounds.maxs.x, worldBounds.mins.y, worldBounds.mins.z},
+                {worldBounds.maxs.x, worldBounds.maxs.y, worldBounds.mins.z},
+                {worldBounds.mins.x, worldBounds.maxs.y, worldBounds.mins.z},
+                {worldBounds.mins.x, worldBounds.mins.y, worldBounds.maxs.z},
+                {worldBounds.maxs.x, worldBounds.mins.y, worldBounds.maxs.z},
+                {worldBounds.maxs.x, worldBounds.maxs.y, worldBounds.maxs.z},
+                {worldBounds.mins.x, worldBounds.maxs.y, worldBounds.maxs.z}
+            }};
+
+            for (const auto& c : corners) {
+                ImVec2 sp{};
+                if (!projectPoint(c, sp)) continue;
+                anyProjected = true;
+                entMin.x = std::min(entMin.x, sp.x);
+                entMin.y = std::min(entMin.y, sp.y);
+                entMax.x = std::max(entMax.x, sp.x);
+                entMax.y = std::max(entMax.y, sp.y);
+            }
+            if (!anyProjected) {
+                ImVec2 centerSp{};
+                if (!projectPoint(worldBounds.center(), centerSp)) continue;
+                entMin = centerSp;
+                entMax = centerSp;
+            }
+
+            const bool contains =
+                entMin.x >= minP.x && entMax.x <= maxP.x &&
+                entMin.y >= minP.y && entMax.y <= maxP.y;
+            const bool intersects =
+                !(entMax.x < minP.x || entMin.x > maxP.x || entMax.y < minP.y || entMin.y > maxP.y);
+
+            if ((crossing && intersects) || (!crossing && contains)) {
+                selection_.add(id);
+            }
+        }
+
+        setStatus(crossing ? "Marquee: crossing select" : "Marquee: window select", 1.5f);
+    };
 
     // Camera orbit / pan / zoom
     if (!gizmoOver) {
@@ -670,10 +1602,142 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
             activeTool_ == ActiveTool::Select ||
             activeTool_ == ActiveTool::FaceSelect ||
             activeTool_ == ActiveTool::Clip;
-        if (m.left && entityTool)   camera_.orbit(m.dx, m.dy);
+        if (m.left && entityTool && !marquee_.dragging && !(activeTool_ == ActiveTool::Select && io.KeyShift))
+            camera_.orbit(m.dx, m.dy);
         if (m.right || m.middle)    camera_.pan  (m.dx, m.dy);
     }
     if (m.scroll != 0.f) camera_.zoom(m.scroll);
+
+    if (activeTool_ == ActiveTool::Select) {
+        if (!marquee_.dragging && io.KeyShift && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !gizmoOver) {
+            marquee_.dragging = true;
+            marquee_.start = ImGui::GetMousePos();
+            marquee_.end = marquee_.start;
+            return;
+        }
+        if (marquee_.dragging) {
+            marquee_.end = ImGui::GetMousePos();
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                runMarqueeSelection();
+                marquee_.dragging = false;
+            }
+            return;
+        }
+    }
+
+    // Paint tool drag-to-paint handling
+    if (activeTool_ == ActiveTool::Paint) {
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            paintDrag_.dragging = false;
+            paintDrag_.paintedFaces.clear();
+            paintDrag_.origMaterials.clear();
+            setStatus("Paint cancelled.");
+            return;
+        }
+
+        if (paintDrag_.dragging) {
+            // Accumulate faces under current mouse position
+            const ImVec2 rel = { ImGui::GetMousePos().x - vpPos.x,
+                                 ImGui::GetMousePos().y - vpPos.y };
+            const glm::vec2 ndc = {
+                 (rel.x / vpSz.x) * 2.f - 1.f,
+                -((rel.y / vpSz.y) * 2.f - 1.f)
+            };
+            
+            if (const auto hit = pickFace(ndc, scene_, camera_, aspect)) {
+                if (entityVisibleInEditor(hit->entityId) && !entityLockedByLayer(hit->entityId)) {
+                    // Add to painted faces if not already painted
+                    bool already = std::any_of(paintDrag_.paintedFaces.begin(), paintDrag_.paintedFaces.end(),
+                        [&](const FaceSelection& f) {
+                            return f.entityId == hit->entityId && f.brushIdx == hit->brushIdx && f.faceIdx == hit->faceIdx;
+                        });
+                    
+                    if (!already && paintDrag_.paintedFaces.size() < 100) {  // Limit to 100 faces per drag
+                        FaceSelection sel;
+                        sel.entityId = hit->entityId;
+                        sel.brushIdx = hit->brushIdx;
+                        sel.faceIdx = hit->faceIdx;
+                        paintDrag_.paintedFaces.push_back(sel);
+                        
+                        auto* e = scene_.getEntity(hit->entityId);
+                        auto* be = std::get_if<scene::BrushEntity>(e);
+                        if (be && hit->brushIdx < be->brushes.size() && hit->faceIdx < be->brushes[hit->brushIdx].faces.size()) {
+                            paintDrag_.origMaterials.push_back(be->brushes[hit->brushIdx].faces[hit->faceIdx].materialId);
+                        } else {
+                            paintDrag_.origMaterials.push_back("default");
+                        }
+                    }
+                }
+            }
+
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                // Commit all painted faces
+                if (!paintDrag_.paintedFaces.empty()) {
+                    std::vector<BatchSetFaceMaterialCommand::FaceRef> faceRefs;
+                    for (size_t i = 0; i < paintDrag_.paintedFaces.size(); ++i) {
+                        const auto& f = paintDrag_.paintedFaces[i];
+                        faceRefs.push_back({
+                            f.entityId, f.brushIdx, f.faceIdx,
+                            paintDrag_.origMaterials[i],
+                            std::string(paintMaterial_)
+                        });
+                    }
+                    
+                    commands_.push(std::make_unique<BatchSetFaceMaterialCommand>(faceRefs), scene_);
+                    
+                    // Rebuild affected entity meshes
+                    std::unordered_set<scene::EntityId> affectedEntities;
+                    for (const auto& f : paintDrag_.paintedFaces) {
+                        affectedEntities.insert(f.entityId);
+                        rebuildEntityMesh(f.entityId);
+                    }
+                    
+                    setStatus(std::format("Painted {} faces", paintDrag_.paintedFaces.size()));
+                }
+                paintDrag_.dragging = false;
+                paintDrag_.paintedFaces.clear();
+                paintDrag_.origMaterials.clear();
+            }
+            return;
+        }
+
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !gizmoOver) {
+            // Start paint drag
+            const ImVec2 rel = { ImGui::GetMousePos().x - vpPos.x,
+                                 ImGui::GetMousePos().y - vpPos.y };
+            const glm::vec2 ndc = {
+                 (rel.x / vpSz.x) * 2.f - 1.f,
+                -((rel.y / vpSz.y) * 2.f - 1.f)
+            };
+            
+            if (const auto hit = pickFace(ndc, scene_, camera_, aspect)) {
+                if (entityVisibleInEditor(hit->entityId) && !entityLockedByLayer(hit->entityId)) {
+                    paintDrag_.dragging = true;
+                    paintDrag_.startPos = ImGui::GetMousePos();
+                    paintDrag_.paintedFaces.clear();
+                    paintDrag_.origMaterials.clear();
+                    
+                    // Add first face
+                    FaceSelection sel;
+                    sel.entityId = hit->entityId;
+                    sel.brushIdx = hit->brushIdx;
+                    sel.faceIdx = hit->faceIdx;
+                    paintDrag_.paintedFaces.push_back(sel);
+                    
+                    auto* e = scene_.getEntity(hit->entityId);
+                    auto* be = std::get_if<scene::BrushEntity>(e);
+                    if (be && hit->brushIdx < be->brushes.size() && hit->faceIdx < be->brushes[hit->brushIdx].faces.size()) {
+                        paintDrag_.origMaterials.push_back(be->brushes[hit->brushIdx].faces[hit->faceIdx].materialId);
+                    } else {
+                        paintDrag_.origMaterials.push_back("default");
+                    }
+                    setStatus("Painting... drag to paint more faces, release to commit.");
+                    selection_.selectEntity(hit->entityId);
+                }
+            }
+        }
+        return;
+    }
 
     // Click handling
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !gizmoOver) {
@@ -687,16 +1751,33 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
         switch (activeTool_) {
         case ActiveTool::Select: {
             const auto id = pickEntity(ndc, scene_, camera_, aspect);
-            if (id != scene::kInvalidEntityId) { selection_.set(id); faceSelection_.clear(); }
-            else                               { selection_.clear(); faceSelection_.clear(); }
+            const bool ctrlAdd = io.KeyCtrl;
+            if (id != scene::kInvalidEntityId && entityVisibleInEditor(id) && !entityLockedByLayer(id)) {
+                if (ctrlAdd) {
+                    if (selection_.contains(id)) selection_.remove(id);
+                    else                         selection_.add(id);
+                } else {
+                    selection_.set(id);
+                }
+                faceSelection_.clear();
+            }
+            else if (id != scene::kInvalidEntityId && !entityVisibleInEditor(id)) {
+                setStatus("Layer is hidden.");
+            }
+            else if (id != scene::kInvalidEntityId && entityLockedByLayer(id)) {
+                setStatus("Layer is locked.");
+            }
+            else {
+                if (!ctrlAdd) { selection_.clear(); faceSelection_.clear(); }
+            }
             break;
         }
         case ActiveTool::FaceSelect:
         case ActiveTool::FaceMove:
         case ActiveTool::Paint: {
             const auto hit = pickFace(ndc, scene_, camera_, aspect);
-            if (hit) {
-                faceSelection_.select(hit->entityId, hit->brushIdx, hit->faceIdx);
+            if (hit && entityVisibleInEditor(hit->entityId) && !entityLockedByLayer(hit->entityId)) {
+                registerBridgeFaceSelection(*hit);
                 selection_.selectEntity(hit->entityId);
                 // In paint mode, immediately set the paint material
                 if (activeTool_ == ActiveTool::Paint) {
@@ -713,6 +1794,10 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
                         }
                     }
                 }
+            } else if (hit && !entityVisibleInEditor(hit->entityId)) {
+                setStatus("Layer is hidden.");
+            } else if (hit && entityLockedByLayer(hit->entityId)) {
+                setStatus("Layer is locked.");
             } else {
                 faceSelection_.clear();
             }
@@ -721,7 +1806,7 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
         case ActiveTool::VertexSelect: {
             // Pick closest vertex to click ray
             const auto hit = pickFace(ndc, scene_, camera_, aspect);
-            if (hit) {
+            if (hit && entityVisibleInEditor(hit->entityId) && !entityLockedByLayer(hit->entityId)) {
                 // From the hit face, find closest vertex to the actual hit point
                 auto* e = scene_.getEntity(hit->entityId);
                 auto* be = std::get_if<scene::BrushEntity>(e);
@@ -739,6 +1824,10 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
                         selection_.selectEntity(hit->entityId);
                     }
                 }
+            } else if (hit && !entityVisibleInEditor(hit->entityId)) {
+                setStatus("Layer is hidden.");
+            } else if (hit && entityLockedByLayer(hit->entityId)) {
+                setStatus("Layer is locked.");
             } else {
                 vertexSelection_.clear();
             }
@@ -746,7 +1835,9 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
         }
         default: {
             const auto id = pickEntity(ndc, scene_, camera_, aspect);
-            if (id != scene::kInvalidEntityId) selection_.set(id);
+            if (id != scene::kInvalidEntityId && entityVisibleInEditor(id) && !entityLockedByLayer(id)) selection_.set(id);
+            else if (id != scene::kInvalidEntityId && !entityVisibleInEditor(id)) setStatus("Layer is hidden.");
+            else if (id != scene::kInvalidEntityId && entityLockedByLayer(id)) setStatus("Layer is locked.");
             else                               selection_.clear();
             faceSelection_.clear();
             vertexSelection_.clear();
@@ -760,11 +1851,11 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
 
 void EditorApp::drawGizmo(ImVec2 vpPos, ImVec2 vpSz) {
     if (!!selection_.empty()) return;
-    if (activeTool_ == ActiveTool::Select ||
-        activeTool_ == ActiveTool::FaceSelect ||
+    if (activeTool_ == ActiveTool::FaceSelect ||
         activeTool_ == ActiveTool::FaceMove ||
         activeTool_ == ActiveTool::Clip ||
-        activeTool_ == ActiveTool::Paint) return;
+        activeTool_ == ActiveTool::Paint ||
+        activeTool_ == ActiveTool::BoxCreate) return;
 
     auto* entity = scene_.getEntity(selection_.primary());
     if (!entity) return;
@@ -774,55 +1865,54 @@ void EditorApp::drawGizmo(ImVec2 vpPos, ImVec2 vpSz) {
     glm::mat4 proj = camera_.projMatrix(aspect);
     glm::mat4 model = gpuData_.count(selection_.primary())
                     ? gpuData_[selection_.primary()].model
-                    : glm::mat4(1.f);
+                    : glm::mat4(scene::entityTransform(*entity).matrix());
 
     ImGuizmo::SetOrthographic(false);
     ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
     ImGuizmo::SetRect(vpPos.x, vpPos.y, vpSz.x, vpSz.y);
 
     ImGuizmo::OPERATION op = ImGuizmo::TRANSLATE;
+    if (activeTool_ == ActiveTool::Select) op = ImGuizmo::TRANSLATE;
     if (activeTool_ == ActiveTool::Rotate) op = ImGuizmo::ROTATE;
     if (activeTool_ == ActiveTool::Scale)  op = ImGuizmo::SCALE;
-
-    const bool wasUsing = gizmoDragging_;
-    if (!gizmoDragging_ && ImGuizmo::IsUsing()) {
-        if (auto* be = std::get_if<scene::BrushEntity>(entity))
-            gizmoDragStartPos_ = glm::vec3(be->transform.translation);
-        gizmoDragging_ = true;
-    }
 
     ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj),
                          op, ImGuizmo::WORLD, glm::value_ptr(model));
 
-    if (ImGuizmo::IsUsing()) {
+    const bool wasUsing = gizmoDragging_;
+    const bool nowUsing = ImGuizmo::IsUsing();
+
+    if (!wasUsing && nowUsing) {
+        gizmoDragStartPos_ = glm::vec3(scene::entityTransform(*entity).translation);
+        gizmoDragging_ = true;
+    }
+
+    if (nowUsing) {
         if (auto it = gpuData_.find(selection_.primary()); it != gpuData_.end())
             it->second.model = model;
-        glm::vec3 pos, scl, skw; glm::vec4 psp; glm::quat rot;
-        glm::decompose(model, scl, rot, pos, skw, psp);
-        if (auto* be = std::get_if<scene::BrushEntity>(entity)) {
-            be->transform.translation = glm::dvec3(pos);
-            be->transform.rotation    = glm::dquat(rot);
+        glm::vec3 pos{0.f}, scl{1.f}, skw{0.f};
+        glm::vec4 psp{0.f};
+        glm::quat rot{1.f, 0.f, 0.f, 0.f};
+        if (glm::decompose(model, scl, rot, pos, skw, psp)) {
+            std::visit([&](auto& ent) {
+                ent.transform.translation = glm::dvec3(pos);
+                ent.transform.rotation    = glm::dquat(rot);
+                ent.transform.scale       = glm::dvec3(scl);
+            }, *entity);
         }
-    } else if (wasUsing && !ImGuizmo::IsUsing()) {
+    } else if (wasUsing && !nowUsing) {
         gizmoDragging_ = false;
-        if (auto* be = std::get_if<scene::BrushEntity>(entity)) {
-            const glm::vec3 newPos = glm::vec3(be->transform.translation);
-            if (glm::length(newPos - gizmoDragStartPos_) > 1e-4f) {
-                // Apply snap
-                if (snapEnabled_) {
-                    const glm::vec3 snapped = snapVec3(newPos, gridSize_);
-                    if (auto* be2 = std::get_if<scene::BrushEntity>(scene_.getEntity(selection_.primary())))
-                        be2->transform.translation = glm::dvec3(snapped);
-                    newPos = snapped;
-                    data.model = glm::mat4(be->transform.matrix());
-                }
-                // Re-push via undo/redo to record correctly
-                commands_.push(std::make_unique<MoveEntityCommand>(
-                    selection_.primary(),
-                    glm::dvec3(gizmoDragStartPos_),
-                    glm::dvec3(newPos)), scene_);
-                commands_.undo(scene_); commands_.redo(scene_);
-            }
+        const glm::vec3 newPos = glm::vec3(scene::entityTransform(*entity).translation);
+        if (glm::length(newPos - gizmoDragStartPos_) > 1e-4f) {
+            glm::vec3 snapped = newPos;
+            if (snapEnabled_) snapped = snapVec3(snapped, gridSize_);
+            commands_.push(std::make_unique<MoveEntityCommand>(
+                selection_.primary(),
+                glm::dvec3(gizmoDragStartPos_),
+                glm::dvec3(snapped)), scene_);
+            // Only update transform, don't rebuild mesh (geometry hasn't changed)
+            updateEntityTransform(selection_.primary());
+            setStatus(std::format("Moved entity to ({:.0f}, {:.0f}, {:.0f})", snapped.x, snapped.y, snapped.z));
         }
     }
 }
@@ -837,49 +1927,221 @@ void EditorApp::drawSceneTree() {
         scene_.entityCount(), st.totalBrushCount);
     ImGui::Separator();
 
+    ImGui::SeparatorText("Layers");
+    std::unordered_set<std::string> layerSet;
+    layerSet.insert("Default");
+    for (const auto& [_, layer] : entityLayers_) layerSet.insert(layer);
+    std::vector<std::string> layers(layerSet.begin(), layerSet.end());
+    std::sort(layers.begin(), layers.end());
+
+    for (const auto& layer : layers) {
+        bool vis = layerVisible(layer);
+        if (ImGui::Checkbox(std::format("##vis_{}", layer).c_str(), &vis)) {
+            layerVisibility_[layer] = vis;
+            if (!vis && !selection_.empty()) {
+                if (!entityVisibleInEditor(selection_.primary())) {
+                    selection_.clear();
+                    faceSelection_.clear();
+                    vertexSelection_.clear();
+                }
+            }
+        }
+        ImGui::SameLine();
+        const bool solo = (!soloLayer_.empty() && soloLayer_ == layer);
+        if (ImGui::SmallButton(std::format("{}##solo_{}", solo ? "S*" : "S", layer).c_str())) {
+            soloLayer_ = solo ? std::string{} : layer;
+            if (!selection_.empty() && !entityVisibleInEditor(selection_.primary())) {
+                selection_.clear();
+                faceSelection_.clear();
+                vertexSelection_.clear();
+            }
+        }
+        ImGui::SameLine();
+        ImGui::TextUnformatted(layer.c_str());
+        ImGui::SameLine();
+        bool lock = layerLocked(layer);
+        if (ImGui::Checkbox(std::format("L##lock_{}", layer).c_str(), &lock)) {
+            layerLocked_[layer] = lock;
+        }
+        ImGui::SameLine();
+        glm::vec3 tint = layerTint(layer);
+        if (ImGui::ColorEdit3(std::format("##tint_{}", layer).c_str(), glm::value_ptr(tint),
+            ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
+            layerTint_[layer] = tint;
+        }
+    }
+
+    if (!soloLayer_.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear Solo")) soloLayer_.clear();
+    }
+
+    ImGui::SetNextItemWidth(-90.f);
+    ImGui::InputTextWithHint("##new_layer", "New layer", newLayerName_, sizeof(newLayerName_));
+    ImGui::SameLine();
+    if (ImGui::Button("Add Layer") && newLayerName_[0] != '\0') {
+        layerVisibility_[newLayerName_] = true;
+        layerLocked_[newLayerName_] = false;
+            layerTint_[newLayerName_] = {1.f, 1.f, 1.f};
+        newLayerName_[0] = '\0';
+    }
+
+    ImGui::Separator();
+
+    std::unordered_set<std::string> groupSet;
+    for (const auto& [_, g] : entityGroups_) {
+        if (!g.empty()) groupSet.insert(g);
+    }
+    std::vector<std::string> groups(groupSet.begin(), groupSet.end());
+    std::sort(groups.begin(), groups.end());
+    std::string groupLabel = groupFilter_.empty() ? "All Groups" : groupFilter_;
+    if (ImGui::BeginCombo("Group Filter", groupLabel.c_str())) {
+        if (ImGui::Selectable("All Groups", groupFilter_.empty())) groupFilter_.clear();
+        for (const auto& group : groups) {
+            const bool selected = (group == groupFilter_);
+            if (ImGui::Selectable(group.c_str(), selected)) groupFilter_ = group;
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::Separator();
+
     for (const auto& [id, entity] : scene_.entities) {
         const bool sel  = (selection_.primary() == id);
         const bool isBE = std::holds_alternative<scene::BrushEntity>(entity);
         const bool isPE = std::holds_alternative<scene::PointEntity>(entity);
         const char* ico = isBE ? "[B]" : isPE ? "[P]" : "[M]";
+        const std::string layer = entityLayer(id);
+        const std::string group = entityGroup(id);
+        const bool hidden = !layerVisible(layer);
+        const bool groupHidden = !entityVisibleByGroup(id);
+        const bool entityHidden = hiddenEntities_.contains(id);
+        const bool entityIsolatedOut = !isolatedEntities_.empty() && !isolatedEntities_.contains(id);
+        const bool locked = layerLocked(layer);
         ImGui::TextDisabled("%s",ico); ImGui::SameLine();
-        ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_Leaf|ImGuiTreeNodeFlags_SpanFullWidth;
-        if (sel) fl |= ImGuiTreeNodeFlags_Selected;
-        const bool open = ImGui::TreeNodeEx(
-            std::format("{}##{}", scene::entityName(entity), id).c_str(), fl);
-        if (ImGui::IsItemClicked()) {
-            if (sel) { selection_.clear(); faceSelection_.clear(); }
-            else     { selection_.set(id); faceSelection_.clear(); }
-        }
-        if (ImGui::BeginPopupContextItem()) {
-            selection_.set(id);
-            if (ImGui::MenuItem("Delete")) {
-                commands_.push(std::make_unique<DeleteEntityCommand>(id), scene_);
-                gpuData_.erase(id); selection_.remove(id); faceSelection_.clear();
+
+        if (renamingId_ == id) {
+            // ── Inline rename InputText ──────────────────────────────────────
+            ImGui::SetNextItemWidth(-1.f);
+            ImGui::SetKeyboardFocusHere();
+            if (ImGui::InputText("##treeRename", treeRenameBuffer_, sizeof(treeRenameBuffer_),
+                                  ImGuiInputTextFlags_EnterReturnsTrue |
+                                  ImGuiInputTextFlags_AutoSelectAll)) {
+                const std::string& cur = scene::entityName(entity);
+                if (treeRenameBuffer_[0] && cur != treeRenameBuffer_)
+                    commands_.push(std::make_unique<RenameEntityCommand>(
+                        id, cur, treeRenameBuffer_), scene_);
+                renamingId_ = scene::kInvalidEntityId;
             }
-            if (isBE && ImGui::MenuItem("Save as Prefab...")) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape))      renamingId_ = scene::kInvalidEntityId;
+            if (!ImGui::IsItemActive() && renamingId_ == id) renamingId_ = scene::kInvalidEntityId;
+        } else {
+            // ── Normal tree-node row ─────────────────────────────────────────
+            ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_Leaf|ImGuiTreeNodeFlags_SpanFullWidth;
+            if (sel) fl |= ImGuiTreeNodeFlags_Selected;
+            const std::string displayName = std::format(
+                "{}{}{}{}{}{}{}##{}",
+                hidden ? "[H] " : "",
+                groupHidden ? "[G] " : "",
+                entityHidden ? "[X] " : entityIsolatedOut ? "[I] " : "",
+                locked ? "[L] " : "",
+                scene::entityName(entity),
+                group.empty() ? "" : "  {",
+                group.empty() ? "" : (group + "}"),
+                id);
+            const bool open = ImGui::TreeNodeEx(
+                displayName.c_str(), fl);
+            if (ImGui::IsItemClicked()) {
+                if (!entityVisibleInEditor(id)) {
+                    setStatus("Entity hidden by layer/group filter.");
+                } else if (locked) {
+                    setStatus("Layer is locked.");
+                } else if (sel) {
+                    selection_.clear(); faceSelection_.clear();
+                } else {
+                    selection_.set(id); faceSelection_.clear();
+                }
+            }
+            // Double-click to rename inline
+            if (ImGui::IsItemHovered() &&
+                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
+                !locked && entityVisibleInEditor(id)) {
                 selection_.set(id);
-                savePrefabFromSelection();
+                renamingId_ = id;
+                std::snprintf(treeRenameBuffer_, sizeof(treeRenameBuffer_),
+                              "%s", scene::entityName(entity).c_str());
             }
-            if (isBE && ImGui::MenuItem("Frame Camera")) {
-                const auto* be = std::get_if<scene::BrushEntity>(&entity);
-                camera_.frameAABB(be->worldBounds());
-            }
-            if (isBE && ImGui::MenuItem("CSG Subtract (this=cutter)")) {
+            if (ImGui::BeginPopupContextItem()) {
                 selection_.set(id);
-                applyCSGSubtract();
+                if (ImGui::MenuItem("Rename")) {
+                    renamingId_ = id;
+                    std::snprintf(treeRenameBuffer_, sizeof(treeRenameBuffer_),
+                                  "%s", scene::entityName(entity).c_str());
+                }
+                if (ImGui::MenuItem("Hide")) {
+                    selection_.set(id);
+                    hideSelection();
+                }
+                if (ImGui::MenuItem("Isolate")) {
+                    selection_.set(id);
+                    isolateSelection();
+                }
+                if (ImGui::MenuItem("Show All Hidden / Clear Isolation", nullptr, false,
+                    !hiddenEntities_.empty() || !isolatedEntities_.empty())) {
+                    clearHiddenIsolation();
+                }
+                if (ImGui::MenuItem("Delete")) {
+                    commands_.push(std::make_unique<DeleteEntityCommand>(id), scene_);
+                    gpuData_.erase(id); selection_.remove(id); faceSelection_.clear();
+                    entityLayers_.erase(id);
+                    entityGroups_.erase(id);
+                }
+                if (isBE && ImGui::MenuItem("Save as Prefab...")) {
+                    selection_.set(id);
+                    savePrefabFromSelection();
+                }
+                if (isBE && ImGui::MenuItem("Frame Camera")) {
+                    const auto* be = std::get_if<scene::BrushEntity>(&entity);
+                    camera_.frameAABB(be->worldBounds());
+                }
+                if (isBE && ImGui::MenuItem("CSG Subtract (this=cutter)")) {
+                    selection_.set(id);
+                    applyCSGSubtract();
+                }
+                ImGui::EndPopup();
             }
-            ImGui::EndPopup();
+            if (open) ImGui::TreePop();
         }
-        if (open) ImGui::TreePop();
     }
     ImGui::End();
 }
 
 // ─── Properties ───────────────────────────────────────────────────────────────
 
+void EditorApp::drawInspector() {
+    drawProperties();
+}
+
 void EditorApp::drawProperties() {
-    ImGui::Begin("Properties");
+    ImGui::Begin("Inspector");
+
+    ImGui::TextColored({0.6f,0.8f,1.f,1.f}, "Entity / Brush Inspector");
+    if (!selection_.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%zu selected", selection_.size());
+    }
+    ImGui::Separator();
+
+    if (!selection_.empty()) {
+        if (ImGui::Button("Frame Selected", {-1.f, 0.f})) {
+            const geo::AABB combined = selection_.combinedBounds(scene_);
+            if (combined.isValid()) camera_.frameAABB(combined);
+        }
+        if (ImGui::Button("Hide Selected", {-1.f, 0.f})) hideSelection();
+        if (ImGui::Button("Isolate Selected", {-1.f, 0.f})) isolateSelection();
+        if (ImGui::Button("Show All Hidden / Clear Isolation", {-1.f, 0.f})) clearHiddenIsolation();
+        ImGui::Separator();
+    }
 
     // ── Vertex properties ────────────────────────────────────────────────────
     if (vertexSelection_.valid() && activeTool_ == ActiveTool::VertexSelect) {
@@ -889,10 +2151,7 @@ void EditorApp::drawProperties() {
     }
 
     // ── Face properties (takes priority when face selected) ──────────────────
-    if (faceSelection_.valid() &&
-        (activeTool_ == ActiveTool::FaceSelect ||
-         activeTool_ == ActiveTool::FaceMove   ||
-         activeTool_ == ActiveTool::Paint))
+    if (faceSelection_.valid())
     {
         drawFaceProperties();
         ImGui::Separator();
@@ -915,6 +2174,54 @@ void EditorApp::drawProperties() {
 
     ImGui::TextColored({0.6f,0.8f,1.f,1.f}, "Entity #%llu",
         static_cast<unsigned long long>(selection_.primary()));
+    ImGui::Separator();
+
+    ImGui::SeparatorText("Organization");
+    {
+        const scene::EntityId id = selection_.primary();
+        std::string curLayer = entityLayer(id);
+        std::unordered_set<std::string> layerSet;
+        layerSet.insert("Default");
+        for (const auto& [_, layer] : entityLayers_) layerSet.insert(layer);
+        std::vector<std::string> layers(layerSet.begin(), layerSet.end());
+        std::sort(layers.begin(), layers.end());
+
+        if (ImGui::BeginCombo("Layer", curLayer.c_str())) {
+            for (const auto& layer : layers) {
+                const bool selected = (layer == curLayer);
+                if (ImGui::Selectable(layer.c_str(), selected) && layer != curLayer) {
+                    commands_.push(std::make_unique<SetEntityLayerCommand>(
+                        id,
+                        entityLayers_,
+                        layerVisibility_,
+                        layerLocked_,
+                        layerTint_,
+                        curLayer,
+                        layer), scene_);
+                    setStatus(std::format("Entity moved to layer '{}'", layer), 1.5f);
+                    curLayer = layer;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+
+        std::string curGroup = entityGroup(id);
+        char groupBuf[64];
+        std::snprintf(groupBuf, sizeof(groupBuf), "%s", curGroup.c_str());
+        if (ImGui::InputText("Group", groupBuf, sizeof(groupBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+            const std::string nextGroup = groupBuf;
+            if (nextGroup != curGroup) {
+                commands_.push(std::make_unique<SetEntityGroupCommand>(
+                    id,
+                    entityGroups_,
+                    curGroup,
+                    nextGroup), scene_);
+                setStatus(std::format("Entity group -> '{}'", nextGroup), 1.5f);
+            }
+        }
+    }
+
     ImGui::Separator();
 
     // Name
@@ -1057,22 +2364,156 @@ void EditorApp::drawFaceProperties() {
             setStatus(std::format("Painted '{}'", matBuf));
         }
     }
-    ImGui::LabelText("Material##lbl","");
+    ImGui::Spacing();
 
     // UV controls
     ImGui::SeparatorText("UV Mapping");
+
+    // Helpers for drag-based UV undo coalescing
+    auto snapshotUV = [&]() {
+        if (!uvDragState_.active)
+            uvDragState_ = { face.uvOffset, face.uvScale, face.uvRotation, true };
+    };
+    auto commitUVDrag = [&]() {
+        if (!uvDragState_.active) return;
+        uvDragState_.active = false;
+        const SetFaceUVCommand::UVState oldState{ uvDragState_.offset, uvDragState_.scale, uvDragState_.rotation };
+        const SetFaceUVCommand::UVState newState{ face.uvOffset, face.uvScale, face.uvRotation };
+        if (oldState.offset != newState.offset || oldState.scale != newState.scale ||
+            oldState.rotation != newState.rotation) {
+            commands_.push(std::make_unique<SetFaceUVCommand>(
+                faceSelection_.entityId, faceSelection_.brushIdx, faceSelection_.faceIdx,
+                oldState, newState), scene_);
+        }
+    };
+
     ImGui::SetNextItemWidth(-1.f);
     ImGui::DragFloat2("Offset", glm::value_ptr(face.uvOffset), 0.5f);
+    if (ImGui::IsItemActivated())           snapshotUV();
+    if (ImGui::IsItemDeactivatedAfterEdit()) { brush.invalidate(); rebuildEntityMesh(faceSelection_.entityId); commitUVDrag(); }
+
     ImGui::SetNextItemWidth(-1.f);
     ImGui::DragFloat2("Scale",  glm::value_ptr(face.uvScale),  0.01f, 0.01f, 64.f);
+    if (ImGui::IsItemActivated())           snapshotUV();
+    if (ImGui::IsItemDeactivatedAfterEdit()) { brush.invalidate(); rebuildEntityMesh(faceSelection_.entityId); commitUVDrag(); }
+
     ImGui::SetNextItemWidth(-1.f);
     ImGui::DragFloat("Rotation",&face.uvRotation, 1.f, -180.f, 180.f);
+    if (ImGui::IsItemActivated())           snapshotUV();
+    if (ImGui::IsItemDeactivatedAfterEdit()) { brush.invalidate(); rebuildEntityMesh(faceSelection_.entityId); commitUVDrag(); }
+
+    auto applyFaceUv = [&] {
+        brush.invalidate();
+        rebuildEntityMesh(faceSelection_.entityId);
+    };
+
+    // Snapshot UV before any button press so we can make a single undo entry
+    const SetFaceUVCommand::UVState uvBeforeButtons{ face.uvOffset, face.uvScale, face.uvRotation };
+    bool uvChanged = false;
+    if (ImGui::Button("Fit 0..1")) {
+        const auto poly = brush.facePolygon(faceSelection_.faceIdx);
+        if (poly.size() >= 3) {
+            const glm::dvec3 nrm = glm::abs(face.plane.normal);
+            glm::dvec3 uAxis{1.0, 0.0, 0.0};
+            glm::dvec3 vAxis{0.0, 0.0, 1.0};
+            if (nrm.y > nrm.x && nrm.y > nrm.z) {
+                uAxis = {1.0, 0.0, 0.0}; vAxis = {0.0, 0.0, 1.0};
+            } else if (nrm.x > nrm.z) {
+                uAxis = {0.0, 1.0, 0.0}; vAxis = {0.0, 0.0, 1.0};
+            } else {
+                uAxis = {1.0, 0.0, 0.0}; vAxis = {0.0, 1.0, 0.0};
+            }
+
+            double minU = std::numeric_limits<double>::max();
+            double maxU = std::numeric_limits<double>::lowest();
+            double minV = std::numeric_limits<double>::max();
+            double maxV = std::numeric_limits<double>::lowest();
+            for (const auto& lp : poly) {
+                const glm::dvec3 wp = be->transform.transformPoint(lp);
+                const double u = glm::dot(wp, uAxis);
+                const double v = glm::dot(wp, vAxis);
+                minU = std::min(minU, u); maxU = std::max(maxU, u);
+                minV = std::min(minV, v); maxV = std::max(maxV, v);
+            }
+            const double spanU = std::max(maxU - minU, 1.0);
+            const double spanV = std::max(maxV - minV, 1.0);
+            face.uvScale = glm::vec2(static_cast<float>(spanU), static_cast<float>(spanV));
+            face.uvOffset = glm::vec2(
+                static_cast<float>(-minU / spanU),
+                static_cast<float>(-minV / spanV));
+            face.uvRotation = 0.0f;
+            uvChanged = true;
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Align Left"))  { face.uvOffset.x -= 0.25f; uvChanged = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Align Right")) { face.uvOffset.x += 0.25f; uvChanged = true; }
+    if (ImGui::Button("Align Up"))    { face.uvOffset.y += 0.25f; uvChanged = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Align Down"))  { face.uvOffset.y -= 0.25f; uvChanged = true; }
+
+    if (ImGui::Button("Rot -15")) { face.uvRotation -= 15.f; uvChanged = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Rot +15")) { face.uvRotation += 15.f; uvChanged = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Rot -45")) { face.uvRotation -= 45.f; uvChanged = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Rot +45")) { face.uvRotation += 45.f; uvChanged = true; }
+    if (ImGui::Button("Rot -90")) { face.uvRotation -= 90.f; uvChanged = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Rot +90")) { face.uvRotation += 90.f; uvChanged = true; }
+
+    if (uvChanged) {
+        applyFaceUv();
+        const SetFaceUVCommand::UVState uvAfterButtons{ face.uvOffset, face.uvScale, face.uvRotation };
+        commands_.push(std::make_unique<SetFaceUVCommand>(
+            faceSelection_.entityId, faceSelection_.brushIdx, faceSelection_.faceIdx,
+            uvBeforeButtons, uvAfterButtons), scene_);
+    }
 
     // Apply UV changes
     if (ImGui::IsItemDeactivatedAfterEdit() ||
         ImGui::IsItemActivated()) // trigger rebuild after any UV drag
     {
         rebuildEntityMesh(faceSelection_.entityId);
+    }
+
+    ImGui::SeparatorText("Face Ops");
+    static double extrudeDistance = 64.0;
+    static double insetAmount = 8.0;
+    static double insetDepth = 16.0;
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::DragScalar("Extrude Distance", ImGuiDataType_Double, &extrudeDistance, 1.0, nullptr, nullptr, "%.1f");
+    if (ImGui::Button("Extrude Face", {-1.f, 0.f})) {
+        if (snapEnabled_) extrudeDistance = snapF(extrudeDistance, gridSize_);
+        extrudeSelectedFace(extrudeDistance);
+    }
+
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::DragScalar("Inset Amount", ImGuiDataType_Double, &insetAmount, 0.5, nullptr, nullptr, "%.1f");
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::DragScalar("Inset Depth", ImGuiDataType_Double, &insetDepth, 0.5, nullptr, nullptr, "%.1f");
+    if (ImGui::Button("Inset Face", {-1.f, 0.f})) {
+        if (snapEnabled_) {
+            insetAmount = snapF(insetAmount, gridSize_);
+            insetDepth = snapF(insetDepth, gridSize_);
+        }
+        insetSelectedFace(insetAmount, insetDepth);
+    }
+
+    ImGui::BeginDisabled(!bridgeSourceFace_.has_value());
+    if (ImGui::Button("Bridge With Previous Face", {-1.f, 0.f})) {
+        bridgeSelectedFaces();
+    }
+    ImGui::EndDisabled();
+    if (bridgeSourceFace_.has_value()) {
+        ImGui::TextDisabled("Bridge source: #%llu b%zu f%zu",
+            static_cast<unsigned long long>(bridgeSourceFace_->entityId),
+            bridgeSourceFace_->brushIdx,
+            bridgeSourceFace_->faceIdx);
+    } else {
+        ImGui::TextDisabled("Bridge source: select a first face, then a second one.");
     }
 }
 
@@ -1165,6 +2606,69 @@ void EditorApp::applyCSGSubtract() {
     setStatus("CSG Subtract applied.");
 }
 
+// ─── Apply: CSG union ─────────────────────────────────────────────────────────
+
+void EditorApp::applyCSGUnion() {
+    if (selection_.ids.size() != 2) return;
+    auto* aEnt = scene_.getEntity(selection_.ids[0]);
+    auto* bEnt = scene_.getEntity(selection_.ids[1]);
+    if (!aEnt || !bEnt) return;
+    auto* aBE = std::get_if<scene::BrushEntity>(aEnt);
+    auto* bBE = std::get_if<scene::BrushEntity>(bEnt);
+    if (!aBE || !bBE) return;
+
+    auto cmd = std::make_unique<CSGUnionCommand>(
+        selection_.ids[0], selection_.ids[1], *aBE, *bBE);
+    commands_.push(std::move(cmd), scene_);
+
+    selection_.clear();
+    faceSelection_.clear();
+    rebuildAllMeshes();
+    setStatus("CSG Union applied.");
+}
+
+// ─── Apply: CSG intersect ─────────────────────────────────────────────────────
+
+void EditorApp::applyCSGIntersect() {
+    if (selection_.ids.size() != 2) return;
+    auto* aEnt = scene_.getEntity(selection_.ids[0]);
+    auto* bEnt = scene_.getEntity(selection_.ids[1]);
+    if (!aEnt || !bEnt) return;
+    auto* aBE = std::get_if<scene::BrushEntity>(aEnt);
+    auto* bBE = std::get_if<scene::BrushEntity>(bEnt);
+    if (!aBE || !bBE) return;
+
+    auto cmd = std::make_unique<CSGIntersectCommand>(
+        selection_.ids[0], selection_.ids[1], *aBE, *bBE);
+    commands_.push(std::move(cmd), scene_);
+
+    selection_.clear();
+    faceSelection_.clear();
+    rebuildAllMeshes();
+    setStatus("CSG Intersect applied.");
+}
+
+// ─── Apply: CSG xor ───────────────────────────────────────────────────────────
+
+void EditorApp::applyCSGXor() {
+    if (selection_.ids.size() != 2) return;
+    auto* aEnt = scene_.getEntity(selection_.ids[0]);
+    auto* bEnt = scene_.getEntity(selection_.ids[1]);
+    if (!aEnt || !bEnt) return;
+    auto* aBE = std::get_if<scene::BrushEntity>(aEnt);
+    auto* bBE = std::get_if<scene::BrushEntity>(bEnt);
+    if (!aBE || !bBE) return;
+
+    auto cmd = std::make_unique<CSGXorCommand>(
+        selection_.ids[0], selection_.ids[1], *aBE, *bBE);
+    commands_.push(std::move(cmd), scene_);
+
+    selection_.clear();
+    faceSelection_.clear();
+    rebuildAllMeshes();
+    setStatus("CSG XOR applied.");
+}
+
 // ─── Apply: hollow ───────────────────────────────────────────────────────────
 
 void EditorApp::applyHollow() {
@@ -1176,8 +2680,18 @@ void EditorApp::applyHollow() {
 
     auto cmd = std::make_unique<HollowEntityCommand>(selection_.primary(), *be);
     cmd->wallThickness = hollowThickness_;
+    const std::string srcLayer = entityLayer(selection_.primary());
+    const std::string srcGroup = entityGroup(selection_.primary());
+    auto* hCmdPtr = cmd.get();
     commands_.push(std::move(cmd), scene_);
-
+    // Propagate layer/group from source to the generated wall entities
+    for (auto wallId : hCmdPtr->wallIds) {
+        entityLayers_[wallId] = srcLayer;
+        entityGroups_[wallId] = srcGroup;
+        if (!layerVisibility_.contains(srcLayer)) layerVisibility_[srcLayer] = true;
+        if (!layerLocked_.contains(srcLayer))     layerLocked_[srcLayer]     = false;
+        if (!layerTint_.contains(srcLayer))       layerTint_[srcLayer]       = {1.f,1.f,1.f};
+    }
     selection_.clear();
     faceSelection_.clear();
     rebuildAllMeshes();
@@ -1195,16 +2709,22 @@ void EditorApp::drawStatusBar() {
     ImGui::Begin("##status", nullptr,
         ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoScrollbar|
         ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|
-        ImGuiWindowFlags_NoNav|ImGuiWindowFlags_NoDocking);
+        ImGuiWindowFlags_NoNav);
 
     if (statusTimer_ > 0.f)
         ImGui::Text("%s", statusMessage_.c_str());
     else
-        ImGui::TextDisabled("FORGE Editor  —  %s", scene_.name.c_str());
+    {
+        if (!selection_.empty())
+            ImGui::TextDisabled("FORGE Editor  —  %s  |  %zu selected",
+                scene_.name.c_str(), selection_.size());
+        else
+            ImGui::TextDisabled("FORGE Editor  —  %s", scene_.name.c_str());
+    }
 
     ImGui::SameLine();
     const auto st = scene_.stats();
-    const std::string r = std::format("  {:.0f} fps  |  {} DC  |  {} tri  |  {} brushes",
+    const std::string r = std::format("  {:.0f} fps  |  {} DC  |  {} tri  |  {} brushes  |  grid: {}{}",
         window_.fps(), renderer_.drawCallCount(), renderer_.triangleCount(),
         st.totalBrushCount, gridLabel(gridSize_), snapEnabled_ ? " [snap]" : "");
     ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x
@@ -1221,7 +2741,7 @@ void EditorApp::exportOBJ() {
     auto sel = pfd::save_file("Export OBJ", (std::filesystem::current_path() / (scene_.name)).string(),
         { "OBJ File", "*.obj", "All Files", "*" }).result();
     if (sel.empty()) return;
-    const auto p = std::filesystem::path(sel[0]).replace_extension("");
+    const auto p = std::filesystem::path(sel).replace_extension("");
     if (export_::exportOBJ(scene_, p, {}))
         setStatus(std::format("OBJ → {}.obj", p.string()));
     else
@@ -1379,8 +2899,19 @@ void EditorApp::runPlayFrame() {
 
     renderer_.beginFrame(frame);
     for (const auto& [id, data] : gpuData_) {
+        if (auto it = entityLayers_.find(id); it != entityLayers_.end()) {
+            if (auto v = layerVisibility_.find(it->second); v != layerVisibility_.end() && !v->second)
+                continue;
+        }
         for (const auto& sub : data.mesh.submeshes)
-            renderer_.submit({ &sub, data.model, materialColour(sub.materialId()) });
+            renderer_.submit({
+                .mesh = &sub,
+                .modelMatrix = data.model,
+                .material = makeEditorMaterial(
+                    materialLibrary_,
+                    sub.materialId(),
+                    materialColour(sub.materialId())),
+            });
     }
     renderer_.endFrame();
 
@@ -1417,7 +2948,7 @@ void EditorApp::drawPlayHUD() {
     ImGui::SetNextWindowBgAlpha(0.55f);
     ImGui::Begin("##playhud", nullptr,
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoDocking);
+        ImGuiWindowFlags_NoNav);
 
     ImGui::TextColored({0.4f, 1.f, 0.4f, 1.f}, "▶ PLAY MODE");
     ImGui::Separator();
@@ -1484,10 +3015,6 @@ static void drawVertexProperties_impl(
 
     auto& brush = be->brushes[vs.brushIdx];
 
-    // Convert world-space position back to local space for editing
-    const glm::dvec3 localPos = glm::dvec3(
-        glm::inverse(be->transform.matrix()) * glm::dvec4(vs.position, 1.0));
-
     glm::vec3 editPos = glm::vec3(vs.position);
     ImGui::SetNextItemWidth(-1.f);
 
@@ -1537,7 +3064,7 @@ void EditorApp::saveSceneAs() {
             : currentFile_.string()),
         { "FORGE Scene", "*.forge", "All Files", "*" }).result();
     if (result.empty()) return;
-    currentFile_ = result;
+    currentFile_ = std::filesystem::path(result);
     saveScene();
 }
 
@@ -1552,6 +3079,22 @@ void EditorApp::openScene() {
         scene_ = std::move(*result);
         selection_.clear(); faceSelection_.clear(); vertexSelection_.clear();
         commands_.clear(); gpuData_.clear();
+        entityLayers_.clear();
+        entityGroups_.clear();
+        hiddenEntities_.clear();
+        isolatedEntities_.clear();
+        layerVisibility_.clear();
+        layerLocked_.clear();
+        layerTint_.clear();
+        soloLayer_.clear();
+        groupFilter_.clear();
+        layerVisibility_["Default"] = true;
+        layerLocked_["Default"] = false;
+        layerTint_["Default"] = {1.f, 1.f, 1.f};
+        for (const auto& [id, _] : scene_.entities) {
+            entityLayers_[id] = "Default";
+            entityGroups_[id] = "";
+        }
         rebuildAllMeshes();
         camera_.frameAABB(scene_.worldBounds());
         currentFile_ = path;
@@ -1567,7 +3110,7 @@ void EditorApp::exportGLTF() {
     auto sel = pfd::save_file("Export GLB", (std::filesystem::current_path() / scene_.name).string(),
         { "GLB File", "*.glb", "All Files", "*" }).result();
     if (sel.empty()) return;
-    const auto p = std::filesystem::path(sel[0]).replace_extension("");
+    const auto p = std::filesystem::path(sel).replace_extension("");
     export_::GLTFExportOptions opts;
     opts.binary = true;
     opts.applyTransforms = true;
@@ -1591,8 +3134,14 @@ static void renderToFbo(
     gfx::Renderer&        renderer,
     gfx::GridRenderer&    grid,
     gfx::SkyboxRenderer&  skybox,
-    gfx::TextureCache&    texCache,
+    gfx::MaterialLibrary& materialLibrary,
     const std::unordered_map<scene::EntityId, EditorApp::EntityGPUData>& gpuData,
+    const std::unordered_map<scene::EntityId, std::string>& entityLayers,
+    const std::unordered_map<scene::EntityId, std::string>& entityGroups,
+    const std::unordered_map<std::string, bool>& layerVisibility,
+    const std::unordered_map<std::string, glm::vec3>& layerTint,
+    const std::string& soloLayer,
+    const std::string& groupFilter,
     const scene::EntityId selectedId,
     const glm::mat4&      view,
     const glm::mat4&      proj,
@@ -1620,12 +3169,33 @@ static void renderToFbo(
 
     renderer.beginFrame(frame);
     for (const auto& [id, data] : gpuData) {
+        const auto layerIt = entityLayers.find(id);
+        const std::string layer = (layerIt != entityLayers.end()) ? layerIt->second : "Default";
+        const bool vis = [&]() {
+            if (!soloLayer.empty() && layer != soloLayer) return false;
+            if (auto it = layerVisibility.find(layer); it != layerVisibility.end()) return it->second;
+            return true;
+        }();
+        const bool groupVis = [&]() {
+            if (groupFilter.empty()) return true;
+            if (auto it = entityGroups.find(id); it != entityGroups.end()) return it->second == groupFilter;
+            return false;
+        }();
+        if (!vis || !groupVis) continue;
+
         const bool sel = (selectedId == id);
+        const glm::vec3 tint = [&]() {
+            if (auto it = layerTint.find(layer); it != layerTint.end()) return it->second;
+            return glm::vec3(1.f, 1.f, 1.f);
+        }();
         for (const auto& sub : data.mesh.submeshes) {
-            glm::vec3 col = {0.7f,0.7f,0.72f};
+            glm::vec3 col = glm::vec3(0.7f,0.7f,0.72f) * tint;
             if (sel) col = glm::mix(col, glm::vec3(0.3f,0.65f,1.f), 0.4f);
-            const uint32_t tex = texCache.load(sub.materialId());
-            renderer.submit({ &sub, data.model, col, tex });
+            renderer.submit({
+                .mesh = &sub,
+                .modelMatrix = data.model,
+                .material = makeEditorMaterial(materialLibrary, sub.materialId(), col),
+            });
         }
     }
     renderer.endFrame();
@@ -1637,6 +3207,164 @@ static void renderToFbo(
     fbo.unbind();
 }
 
+void EditorApp::handleOrthoPaneMouse(int pane, ImVec2 panePos, ImVec2 paneSz) {
+    if (!orthoEditMode_ || pane <= 0 || pane > 3) return;
+
+    auto& oc = orthoCams_[pane - 1];
+    const ImVec2 mouse = ImGui::GetMousePos();
+    const glm::mat4 vp = oc.vpMatrix(paneSz.x, paneSz.y);
+
+    auto projectPoint = [&](const glm::dvec3& worldPos, ImVec2& out) -> bool {
+        const glm::vec4 clip = vp * glm::vec4(glm::vec3(worldPos), 1.f);
+        if (std::abs(clip.w) < 1e-5f) return false;
+        const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        out = {
+            panePos.x + (ndc.x * 0.5f + 0.5f) * paneSz.x,
+            panePos.y + (-ndc.y * 0.5f + 0.5f) * paneSz.y
+        };
+        return true;
+    };
+
+    auto worldBoundsForEntity = [&](const scene::Entity& entity) -> std::optional<geo::AABB> {
+        if (const auto* be = std::get_if<scene::BrushEntity>(&entity)) {
+            const geo::AABB wb = be->worldBounds();
+            if (wb.isValid()) return wb;
+            return std::nullopt;
+        }
+        geo::AABB box;
+        const glm::dvec3 p = scene::entityTransform(entity).translation;
+        box.expand(p - glm::dvec3{16.0, 16.0, 16.0});
+        box.expand(p + glm::dvec3{16.0, 16.0, 16.0});
+        return box;
+    };
+
+    auto pickEntity2D = [&]() -> scene::EntityId {
+        scene::EntityId bestId = scene::kInvalidEntityId;
+        float bestArea = std::numeric_limits<float>::max();
+        for (const auto& [id, entity] : scene_.entities) {
+            if (!entityVisibleInEditor(id) || entityLockedByLayer(id)) continue;
+            const auto worldBounds = worldBoundsForEntity(entity);
+            if (!worldBounds.has_value() || !worldBounds->isValid()) continue;
+
+            ImVec2 minP{ std::numeric_limits<float>::max(), std::numeric_limits<float>::max() };
+            ImVec2 maxP{ std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest() };
+            bool anyProjected = false;
+            const auto& b = *worldBounds;
+            const std::array<glm::dvec3, 8> corners = {{
+                {b.mins.x, b.mins.y, b.mins.z}, {b.maxs.x, b.mins.y, b.mins.z},
+                {b.maxs.x, b.maxs.y, b.mins.z}, {b.mins.x, b.maxs.y, b.mins.z},
+                {b.mins.x, b.mins.y, b.maxs.z}, {b.maxs.x, b.mins.y, b.maxs.z},
+                {b.maxs.x, b.maxs.y, b.maxs.z}, {b.mins.x, b.maxs.y, b.maxs.z}
+            }};
+            for (const auto& c : corners) {
+                ImVec2 sp{};
+                if (!projectPoint(c, sp)) continue;
+                anyProjected = true;
+                minP.x = std::min(minP.x, sp.x);
+                minP.y = std::min(minP.y, sp.y);
+                maxP.x = std::max(maxP.x, sp.x);
+                maxP.y = std::max(maxP.y, sp.y);
+            }
+            if (!anyProjected) continue;
+            if (mouse.x < minP.x || mouse.x > maxP.x || mouse.y < minP.y || mouse.y > maxP.y) continue;
+            const float area = std::max(1.f, (maxP.x - minP.x) * (maxP.y - minP.y));
+            if (area < bestArea) {
+                bestArea = area;
+                bestId = id;
+            }
+        }
+        return bestId;
+    };
+
+    if (ImGui::GetIO().MouseWheel != 0.f) oc.zoomBy(ImGui::GetIO().MouseWheel);
+    const auto& m = window_.input().mouse;
+    if (m.right || m.middle) {
+        oc.pan(m.dx, m.dy);
+        return;
+    }
+
+    if (orthoDragState_.active && orthoDragState_.pane == pane) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const glm::vec2 curMouse{mouse.x, mouse.y};
+            const glm::vec2 deltaPx = curMouse - orthoDragState_.lastMouse;
+            orthoDragState_.lastMouse = curMouse;
+
+            glm::dvec3 worldDelta{0.0, 0.0, 0.0};
+            switch (oc.dir) {
+            case gfx::OrthoCamera::Dir::Top:   worldDelta = { deltaPx.x * oc.zoom, 0.0,  deltaPx.y * oc.zoom }; break;
+            case gfx::OrthoCamera::Dir::Front: worldDelta = { deltaPx.x * oc.zoom, -deltaPx.y * oc.zoom, 0.0 }; break;
+            case gfx::OrthoCamera::Dir::Right: worldDelta = { 0.0, -deltaPx.y * oc.zoom, -deltaPx.x * oc.zoom }; break;
+            }
+
+            for (auto& entry : orthoDragState_.entries) {
+                if (auto* entity = scene_.getEntity(entry.id)) {
+                    std::visit([&](auto& e) { e.transform.translation += worldDelta; }, *entity);
+                    if (auto it = gpuData_.find(entry.id); it != gpuData_.end())
+                        it->second.model = glm::mat4(scene::entityTransform(*entity).matrix());
+                }
+            }
+            return;
+        }
+
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            glm::dvec3 totalDelta{0.0, 0.0, 0.0};
+            for (const auto& entry : orthoDragState_.entries) {
+                if (auto* entity = scene_.getEntity(entry.id)) {
+                    totalDelta = scene::entityTransform(*entity).translation - entry.startTranslation;
+                    break;
+                }
+            }
+            if (snapEnabled_) {
+                totalDelta.x = snapF(totalDelta.x, gridSize_);
+                totalDelta.y = snapF(totalDelta.y, gridSize_);
+                totalDelta.z = snapF(totalDelta.z, gridSize_);
+            }
+
+            for (const auto& entry : orthoDragState_.entries)
+                if (auto* entity = scene_.getEntity(entry.id))
+                    std::visit([&](auto& e) { e.transform.translation = entry.startTranslation; }, *entity);
+
+            if (glm::length(totalDelta) > 1e-4) {
+                auto cmd = std::make_unique<BatchMoveCommand>();
+                for (const auto& entry : orthoDragState_.entries)
+                    cmd->entries.push_back({ entry.id, totalDelta });
+                commands_.push(std::move(cmd), scene_);
+                rebuildAllMeshes();
+                setStatus(std::format("Ortho move ({:.0f}, {:.0f}, {:.0f})", totalDelta.x, totalDelta.y, totalDelta.z));
+            } else {
+                rebuildAllMeshes();
+            }
+
+            orthoDragState_ = {};
+            return;
+        }
+    }
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        const auto picked = pickEntity2D();
+        if (picked != scene::kInvalidEntityId) {
+            if (ImGui::GetIO().KeyCtrl) selection_.toggle(picked);
+            else                        selection_.set(picked);
+            faceSelection_.clear();
+            vertexSelection_.clear();
+
+            orthoDragState_ = {};
+            orthoDragState_.active = true;
+            orthoDragState_.pane = pane;
+            orthoDragState_.entityId = picked;
+            orthoDragState_.startMouse = { mouse.x, mouse.y };
+            orthoDragState_.lastMouse = orthoDragState_.startMouse;
+            for (auto id : selection_.ids)
+                if (auto* entity = scene_.getEntity(id))
+                    orthoDragState_.entries.push_back({ id, scene::entityTransform(*entity).translation });
+            return;
+        }
+        selection_.clear();
+        faceSelection_.clear();
+        vertexSelection_.clear();
+    }
+}
+
 void EditorApp::drawQuadViewport() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.f,0.f});
     ImGui::Begin("Viewport");
@@ -1645,6 +3373,7 @@ void EditorApp::drawQuadViewport() {
     const ImVec2 total = ImGui::GetContentRegionAvail();
     if (total.x < 8.f || total.y < 8.f) { ImGui::End(); return; }
 
+    const ImVec2 origin  = ImGui::GetCursorScreenPos();
     const ImVec2 cellSz = { total.x * 0.5f, total.y * 0.5f };
     const float  aspect  = cellSz.x / cellSz.y;
     const glm::vec3 camPos = camera_.position();
@@ -1675,8 +3404,8 @@ void EditorApp::drawQuadViewport() {
     for (int pane = 0; pane < 4; ++pane) {
         const int col = pane % 2, row = pane / 2;
         ImVec2 panePos = {
-            ImGui::GetCursorScreenPos().x + col * cellSz.x,
-            ImGui::GetCursorScreenPos().y + row * cellSz.y
+            origin.x + col * cellSz.x,
+            origin.y + row * cellSz.y
         };
 
         glm::mat4 view, proj;
@@ -1696,18 +3425,15 @@ void EditorApp::drawQuadViewport() {
         }
 
         renderToFbo(quadFbos_[pane], cellSz, renderer_, gridRenderer_,
-                    skyboxRenderer_, textureCache_, gpuData_,
+                    skyboxRenderer_, materialLibrary_, gpuData_,
+                    entityLayers_, entityGroups_, layerVisibility_, layerTint_,
+                    soloLayer_, groupFilter_,
                     selection_.primary(), view, proj, eye,
                     wireframe_, showGrid_, showSkybox_, (pane != 0), base);
 
         // Display sub-viewport
-        if (col == 0 && row == 0) {
-            ImGui::SetCursorScreenPos(panePos);
-        }
         ImGui::SetCursorScreenPos(panePos);
-        ImGui::Image(
-            reinterpret_cast<ImTextureID>(static_cast<intptr_t>(quadFbos_[pane].colorTexture)),
-            cellSz, {0.f,1.f}, {1.f,0.f});
+        ImGui::Image(toImTextureID(quadFbos_[pane].colorTexture), cellSz, {0.f,1.f}, {1.f,0.f});
 
         // Active pane highlight
         const bool active = (pane == activeQuadPane_);
@@ -1731,10 +3457,7 @@ void EditorApp::drawQuadViewport() {
                 if (m.right || m.middle) camera_.pan(m.dx, m.dy);
                 if (m.scroll != 0.f) camera_.zoom(m.scroll);
             } else {
-                // Orthographic: pan + zoom
-                auto& oc = orthoCams_[pane - 1];
-                if (m.left || m.right || m.middle) oc.pan(m.dx, m.dy);
-                if (m.scroll != 0.f) oc.zoomBy(m.scroll);
+                handleOrthoPaneMouse(pane, panePos, cellSz);
             }
         }
     }
@@ -1791,7 +3514,7 @@ void EditorApp::drawMaterialBrowser() {
 
         const bool clicked = ImGui::ImageButton(
             matId.c_str(),
-            reinterpret_cast<ImTextureID>(static_cast<intptr_t>(texId)),
+            toImTextureID(texId),
             {thumbSz, thumbSz}, {0.f,1.f}, {1.f,0.f});
 
         if (selected) ImGui::PopStyleColor();
@@ -1948,11 +3671,17 @@ void EditorApp::savePrefabFromSelection() {
     Prefab p;
     p.name    = be->name;
     p.brushes = be->brushes;
+    
+    // Capture entity metadata (NEW in v1.0.0)
+    p.solid   = be->solid;
+    p.visible = be->visible;
+    p.layer   = entityLayer(selection_.primary());  // Get from editor layer map
 
     const auto path = std::filesystem::current_path() / (be->name + ".fprefab");
     const auto err  = savePrefab(p, path);
     if (err.empty())
-        setStatus(std::format("Saved prefab → {}", path.string()));
+        setStatus(std::format("Saved prefab → {} (solid={}, visible={}, layer={})", 
+                             path.string(), p.solid, p.visible, p.layer));
     else
         setStatus(std::format("Prefab save failed: {}", err));
 }
@@ -1970,8 +3699,26 @@ void EditorApp::insertPrefab() {
     }
 
     const glm::dvec3 spawnPos = glm::dvec3(camera_.target);
-    auto e = instantiatePrefab(*result, spawnPos);
+    
+    // Use new instantiation options (position only, for now)
+    PrefabInstantiationOptions opts;
+    opts.position = spawnPos;
+    // layer_override is not set, so it uses the prefab's default layer
+    
+    auto e = instantiatePrefab(*result, opts);
     const auto id = scene_.addEntity(std::move(e));
+    
+    // Set up editor metadata
+    entityLayers_[id] = result->layer;
+    entityGroups_[id] = "";  // New instances get no group by default
+    
+    // Ensure layer exists in visibility/lock maps
+    if (!layerVisibility_.contains(result->layer)) {
+        layerVisibility_[result->layer] = true;
+        layerLocked_[result->layer] = false;
+        layerTint_[result->layer] = {1.f, 1.f, 1.f};
+    }
+    
     rebuildEntityMesh(id);
     selection_.set(id);
     setStatus(std::format("Inserted prefab '{}'", result->name));
@@ -1986,14 +3733,16 @@ namespace forge::editor {
 // ─── Level validation panel ───────────────────────────────────────────────────
 
 void EditorApp::runValidation() {
-    lastValidation_ = validateScene(scene_);
+    lastValidation_ = validateScene(scene_, materialLibrary_);
     showValidation_ = true;
     const std::size_t errs = lastValidation_.errorCount();
     const std::size_t warn = lastValidation_.warningCount();
     if (errs > 0)
-        setStatus(std::format("Validation: {} errors, {} warnings.", errs, warn));
+        setStatus(std::format("Validation: {} errors, {} warnings. ({} ms)", 
+            errs, warn, lastValidation_.validationTime.count()));
     else if (warn > 0)
-        setStatus(std::format("Validation passed with {} warnings.", warn));
+        setStatus(std::format("Validation passed with {} warnings. ({} ms)", 
+            warn, lastValidation_.validationTime.count()));
     else
         setStatus("Validation passed — scene is clean.");
 }
@@ -2074,23 +3823,64 @@ void EditorApp::duplicateSelection() {
         return;
     }
 
+    const auto duplicateCount = cmd->originals.size();
+    auto* cmdPtr = cmd.get();
     commands_.push(std::move(cmd), scene_);
-
-    // Select the new clones and rebuild their meshes
-    const auto* dupeCmd = dynamic_cast<const DuplicateEntitiesCommand*>(
-        // peek at last command — rebuild for each clone
-        nullptr); // Can't peek directly, so rebuild all
+    // Select the newly created clones so user can immediately move them
+    selection_.clear();
+    for (auto id : cmdPtr->cloneIds) selection_.add(id);
     rebuildAllMeshes();
+    setStatus(std::format("Duplicated {} entities.", duplicateCount));
+}
 
-    // Update selection to the new clones
-    const auto& all = dynamic_cast<DuplicateEntitiesCommand*>(
-        // Simpler: rebuild all and re-select anything new
-        nullptr);
-    // Rebuild and keep old selection for simplicity
-    setStatus(std::format("Duplicated {} entities.", cmd->originals.size()));
+void EditorApp::nudgeSelection(const glm::dvec3& delta) {
+    if (selection_.empty()) return;
 
-    // Actually just rebuild and keep selection unchanged
-    // The duplicates appear slightly offset and can be selected separately
+    std::vector<BatchMoveCommand::Entry> entries;
+    entries.reserve(selection_.size());
+
+    for (auto id : selection_.ids) {
+        auto* entity = scene_.getEntity(id);
+        if (!entity || !entityVisibleInEditor(id) || entityLockedByLayer(id)) continue;
+        entries.push_back({ id, delta });
+    }
+
+    if (entries.empty()) return;
+
+    auto cmd = std::make_unique<BatchMoveCommand>();
+    cmd->entries = std::move(entries);
+    const std::size_t count = cmd->entries.size();
+    commands_.push(std::move(cmd), scene_);
+    rebuildAllMeshes();
+    setStatus(std::format("Moved {} entities by ({:.0f}, {:.0f}, {:.0f})", count, delta.x, delta.y, delta.z));
+}
+
+void EditorApp::hideSelection() {
+    if (selection_.empty()) return;
+    for (auto id : selection_.ids) hiddenEntities_.insert(id);
+    selection_.clear();
+    faceSelection_.clear();
+    vertexSelection_.clear();
+    bridgeSourceFace_.reset();
+    setStatus("Selected entities hidden.");
+}
+
+void EditorApp::isolateSelection() {
+    if (selection_.empty()) return;
+    isolatedEntities_.clear();
+    for (auto id : selection_.ids) {
+        isolatedEntities_.insert(id);
+        hiddenEntities_.erase(id);
+    }
+    reconcileEditorState();
+    setStatus("Isolated selection.");
+}
+
+void EditorApp::clearHiddenIsolation() {
+    hiddenEntities_.clear();
+    isolatedEntities_.clear();
+    reconcileEditorState();
+    setStatus("Visibility reset.");
 }
 
 } // namespace forge::editor — Phase 9 additions
@@ -2102,8 +3892,6 @@ namespace forge::editor {
 // ─── BSP build + panel ───────────────────────────────────────────────────────
 
 void EditorApp::buildBSP() {
-    const auto t0 = std::chrono::steady_clock::now();
-
     bsp::BSPBuildOptions opts;
     opts.maxDepth     = 20;
     opts.splitPenalty = 8;
@@ -2182,6 +3970,7 @@ void EditorApp::drawBSPPanel() {
 void EditorApp::drawMeshEntities(const gfx::RenderFrame& frame) {
     // Render all MeshEntities in the scene using the mesh asset cache
     for (const auto& [id, entity] : scene_.entities) {
+        if (!entityVisibleInEditor(id)) continue;
         const auto* me = std::get_if<scene::MeshEntity>(&entity);
         if (!me || !me->visible || me->assetPath.empty()) continue;
 
@@ -2190,12 +3979,16 @@ void EditorApp::drawMeshEntities(const gfx::RenderFrame& frame) {
 
         const glm::mat4 model = glm::mat4(me->transform.matrix());
         const bool sel = selection_.contains(id);
+        const glm::vec3 tint = layerTint(entityLayer(id));
 
         for (const auto& sub : gpu->submeshes) {
-            glm::vec3 col = {0.7f,0.7f,0.72f};
+            glm::vec3 col = glm::vec3(0.7f,0.7f,0.72f) * tint;
             if (sel) col = glm::mix(col, glm::vec3(0.3f,0.65f,1.f), 0.4f);
-            const uint32_t texId = textureCache_.load(sub.materialId());
-            renderer_.submit({ &sub, model, col, texId });
+            renderer_.submit({
+                .mesh = &sub,
+                .modelMatrix = model,
+                .material = makeEditorMaterial(materialLibrary_, sub.materialId(), col),
+            });
         }
     }
 }
@@ -2359,84 +4152,6 @@ void EditorApp::triggerSpeakerEntities() {
         const float vol = pe->property<float>("volume", 1.f);
         audioEngine_.play3D(*file, glm::vec3(pe->transform.translation), vol);
     }
-}
-
-} // namespace forge::editor — Phase 11 additions
-
-// ─── Phase 11 — Script console panel ─────────────────────────────────────────
-
-namespace forge::editor {
-
-void EditorApp::drawScriptConsole() {
-    ImGui::SetNextWindowSize({520.f, 380.f}, ImGuiCond_FirstUseEver);
-    ImGui::Begin("Script Console", &showScriptConsole_);
-
-    // Bind scene so scripts can query it
-    scriptEnv_.bindScene(&scene_);
-
-    // ── Log output area ───────────────────────────────────────────────────────
-    const float inputHeight = ImGui::GetFrameHeightWithSpacing() + 8.f;
-    ImGui::BeginChild("##log",
-        {0.f, ImGui::GetContentRegionAvail().y - inputHeight - 4.f},
-        true, ImGuiWindowFlags_HorizontalScrollbar);
-
-    for (const auto& entry : scriptEnv_.consoleLog()) {
-        ImVec4 col;
-        switch (entry.kind) {
-        case script::ConsoleEntry::Kind::Input:
-            col = {0.6f, 0.8f, 1.f, 1.f}; break;
-        case script::ConsoleEntry::Kind::Error:
-            col = {1.f, 0.4f, 0.4f, 1.f}; break;
-        default:
-            col = {0.9f, 0.9f, 0.9f, 1.f}; break;
-        }
-        const char* prefix = (entry.kind == script::ConsoleEntry::Kind::Input) ? "> " : "  ";
-        ImGui::PushStyleColor(ImGuiCol_Text, col);
-        ImGui::TextUnformatted(prefix);
-        ImGui::SameLine();
-        ImGui::TextWrapped("%s", entry.text.c_str());
-        ImGui::PopStyleColor();
-    }
-
-    // Auto-scroll to bottom
-    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
-        ImGui::SetScrollHereY(1.f);
-
-    ImGui::EndChild();
-
-    // ── Input field ───────────────────────────────────────────────────────────
-    ImGui::Separator();
-    ImGui::SetNextItemWidth(-70.f);
-
-    const bool execute = ImGui::InputText("##luainput", scriptInputBuf_,
-        sizeof(scriptInputBuf_),
-        ImGuiInputTextFlags_EnterReturnsTrue);
-    ImGui::SameLine();
-
-    if ((execute || ImGui::Button("Run")) && scriptInputBuf_[0]) {
-        scriptEnv_.exec(scriptInputBuf_);
-        scriptInputBuf_[0] = '\0';
-        ImGui::SetKeyboardFocusHere(-1);
-    }
-
-    ImGui::SameLine();
-    if (ImGui::Button("Clear")) scriptEnv_.clearLog();
-
-    // ── Bloom tuning (bonus — shown in same window for compactness) ───────────
-    ImGui::Separator();
-    ImGui::SeparatorText("Bloom");
-    ImGui::Checkbox("Enable", &showBloom_); ImGui::SameLine();
-    ImGui::SetNextItemWidth(100.f);
-    ImGui::SliderFloat("Threshold", &bloomThreshold_, 0.f, 1.f);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(100.f);
-    ImGui::SliderFloat("Intensity", &bloomIntensity_, 0.f, 4.f);
-
-    // Sync to BloomRenderer
-    bloomRenderer_.threshold = bloomThreshold_;
-    bloomRenderer_.intensity = bloomIntensity_;
-
-    ImGui::End();
 }
 
 } // namespace forge::editor — Phase 11

@@ -1,11 +1,9 @@
-find_package(imgui CONFIG REQUIRED)
-
 add_executable(forge-viewer main.cpp)
 
 target_link_libraries(forge-viewer
     PRIVATE
         forge::gfx
-        imgui::imgui
+        forge::imgui
         forge_compile_options
 )
 

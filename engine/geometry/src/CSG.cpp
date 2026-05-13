@@ -144,4 +144,89 @@ hollowBrush(const Brush& brush, double wallThickness) noexcept {
     return walls;
 }
 
+// ─── csgIntersect ────────────────────────────────────────────────────────────
+
+std::vector<Brush>
+csgIntersect(const Brush& subject, const Brush& cutter) noexcept {
+    // Keep only the parts of subject that are INSIDE cutter.
+    // Algorithm: Apply each cutter face plane as a "keep back" filter.
+    // Fragments that survive all filters are inside the cutter volume.
+
+    const AABB subjectBounds = subject.bounds();
+    const AABB cutterBounds = cutter.bounds();
+
+    // Quick rejection: if AABB don't overlap, intersection is empty
+    if (!subjectBounds.overlaps(cutterBounds))
+        return {};
+
+    std::vector<Brush> inside = { subject };
+
+    for (const auto& cutterFace : cutter.faces) {
+        std::vector<Brush> nextInside;
+        nextInside.reserve(inside.size());
+
+        for (const Brush& piece : inside) {
+            auto [front, back] = splitBrushByPlane(piece, cutterFace.plane);
+            // Keep only the 'back' piece (inside the cutter face)
+            if (back) nextInside.push_back(std::move(*back));
+        }
+
+        inside = std::move(nextInside);
+        if (inside.empty()) break;  // Early exit if nothing left
+    }
+
+    return inside;
+}
+
+// ─── csgUnion ────────────────────────────────────────────────────────────────
+
+std::vector<Brush>
+csgUnion(const Brush& subject, const Brush& cutter) noexcept {
+    // Union = subject + (cutter - subject)
+    // All of subject, plus the parts of cutter that stick out.
+
+    const AABB subjectBounds = subject.bounds();
+    const AABB cutterBounds = cutter.bounds();
+
+    // If no overlap, just return both as-is
+    if (!subjectBounds.overlaps(cutterBounds)) {
+        return { subject, cutter };
+    }
+
+    // Subtract subject from cutter to get the cutter's overhang
+    const auto cutter_only = subtractOne({ cutter }, subject);
+
+    // Union = subject + (cutter - subject)
+    std::vector<Brush> result;
+    result.push_back(subject);
+    result.insert(result.end(), cutter_only.begin(), cutter_only.end());
+
+    return result;
+}
+
+// ─── csgXor ──────────────────────────────────────────────────────────────────
+
+std::vector<Brush>
+csgXor(const Brush& subject, const Brush& cutter) noexcept {
+    // XOR = (subject - cutter) + (cutter - subject)
+    // All parts that are in one or the other, but not both.
+
+    const AABB subjectBounds = subject.bounds();
+    const AABB cutterBounds = cutter.bounds();
+
+    // If no overlap, both are in the XOR result
+    if (!subjectBounds.overlaps(cutterBounds)) {
+        return { subject, cutter };
+    }
+
+    const auto subject_only = subtractOne({ subject }, cutter);
+    const auto cutter_only = subtractOne({ cutter }, subject);
+
+    std::vector<Brush> result;
+    result.insert(result.end(), subject_only.begin(), subject_only.end());
+    result.insert(result.end(), cutter_only.begin(), cutter_only.end());
+
+    return result;
+}
+
 } // namespace forge::geo

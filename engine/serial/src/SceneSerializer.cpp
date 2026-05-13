@@ -74,10 +74,6 @@ static glm::dquat rQuat(const json& j) {
     return { j[3].get<double>(), j[0].get<double>(), j[1].get<double>(), j[2].get<double>() };
 }
 
-static geo::Plane readPlane(const json& j) {
-    return geo::Plane::fromNormalPoint(rVec3(j["normal"]), rVec3(j["normal"]) * j["distance"].get<double>());
-}
-
 // Actually store plane directly (normal + distance)
 static geo::Plane readPlane2(const json& j) {
     geo::Plane p;

@@ -90,7 +90,7 @@ private:
     bool                        initialised_ = false;
     std::filesystem::path       soundRoot_;
     std::unique_ptr<ma_engine>  engine_;
-    std::array<SoundSlot, kSoundPoolSize> pool_;
+    std::unique_ptr<SoundSlot[]> pool_;
 
     [[nodiscard]] std::filesystem::path resolve(const std::string& f) const noexcept;
     [[nodiscard]] int findFreeSlot() const noexcept;

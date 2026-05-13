@@ -61,7 +61,7 @@ private:
     void ensureFbos(int w, int h) noexcept;
     void runBrightPass(uint32_t sceneTex) noexcept;
     void runBlur() noexcept;
-    void runComposite(uint32_t sceneTex) noexcept;
+    void runComposite(uint32_t sceneTex, uint32_t bloomTex) noexcept;
 };
 
 } // namespace forge::gfx

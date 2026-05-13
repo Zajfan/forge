@@ -6,6 +6,7 @@
 #include <format>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace forge::editor {
@@ -38,6 +39,7 @@ public:
     [[nodiscard]] std::string lastUndoLabel() const { return canUndo() ? history_[cursor_-1]->describe() : ""; }
     [[nodiscard]] std::string lastRedoLabel() const { return canRedo() ? history_[cursor_]->describe()   : ""; }
     [[nodiscard]] std::size_t size()   const noexcept { return history_.size(); }
+    [[nodiscard]] std::size_t cursor() const noexcept { return cursor_; }
     void clear() noexcept { history_.clear(); cursor_ = 0; }
 
 private:
@@ -121,6 +123,98 @@ private:
     }
 };
 
+// ─── Set entity layer/group metadata ────────────────────────────────────────
+
+struct SetEntityLayerCommand final : Command {
+    scene::EntityId entityId;
+    std::unordered_map<scene::EntityId, std::string>& entityLayers;
+    std::unordered_map<std::string, bool>&            layerVisibility;
+    std::unordered_map<std::string, bool>&            layerLocked;
+    std::unordered_map<std::string, glm::vec3>&       layerTint;
+    std::string oldLayer;
+    std::string newLayer;
+
+    SetEntityLayerCommand(
+        scene::EntityId id,
+        std::unordered_map<scene::EntityId, std::string>& layers,
+        std::unordered_map<std::string, bool>& visibility,
+        std::unordered_map<std::string, bool>& locked,
+        std::unordered_map<std::string, glm::vec3>& tint,
+        std::string oldValue,
+        std::string newValue)
+        : entityId(id)
+        , entityLayers(layers)
+        , layerVisibility(visibility)
+        , layerLocked(locked)
+        , layerTint(tint)
+        , oldLayer(std::move(oldValue))
+        , newLayer(std::move(newValue)) {}
+
+    void execute(scene::Scene& s) override { setLayer(s, newLayer); }
+    void undo   (scene::Scene& s) override { setLayer(s, oldLayer); }
+    std::string describe() const override  { return std::format("Set layer '{}'", newLayer); }
+
+private:
+    void setLayer(scene::Scene& s, const std::string& value) {
+        if (!s.hasEntity(entityId)) return;
+        entityLayers[entityId] = value;
+        if (!layerVisibility.contains(value)) layerVisibility[value] = true;
+        if (!layerLocked.contains(value)) layerLocked[value] = false;
+        if (!layerTint.contains(value)) layerTint[value] = {1.f, 1.f, 1.f};
+    }
+};
+
+struct SetEntityGroupCommand final : Command {
+    scene::EntityId entityId;
+    std::unordered_map<scene::EntityId, std::string>& entityGroups;
+    std::string oldGroup;
+    std::string newGroup;
+
+    SetEntityGroupCommand(
+        scene::EntityId id,
+        std::unordered_map<scene::EntityId, std::string>& groups,
+        std::string oldValue,
+        std::string newValue)
+        : entityId(id)
+        , entityGroups(groups)
+        , oldGroup(std::move(oldValue))
+        , newGroup(std::move(newValue)) {}
+
+    void execute(scene::Scene& s) override { setGroup(s, newGroup); }
+    void undo   (scene::Scene& s) override { setGroup(s, oldGroup); }
+    std::string describe() const override  { return std::format("Set group '{}'", newGroup); }
+
+private:
+    void setGroup(scene::Scene& s, const std::string& value) {
+        if (!s.hasEntity(entityId)) return;
+        entityGroups[entityId] = value;
+    }
+};
+
+// ─── Batch delete ────────────────────────────────────────────────────────────
+// Atomically deletes multiple entities in one command (one undo step).
+
+struct BatchDeleteCommand final : Command {
+    struct Snapshot { scene::EntityId id; scene::Entity data; };
+    std::vector<scene::EntityId> targets;
+    std::vector<Snapshot>        saved;
+
+    explicit BatchDeleteCommand(std::vector<scene::EntityId> ids)
+        : targets(std::move(ids)) {}
+
+    void execute(scene::Scene& s) override {
+        saved.clear();
+        for (auto id : targets)
+            if (auto* e = s.getEntity(id)) { saved.push_back({ id, *e }); s.removeEntity(id); }
+    }
+    void undo(scene::Scene& s) override {
+        for (auto& snap : saved) s.addEntity(snap.data);
+    }
+    std::string describe() const override {
+        return std::format("Delete {} entities", targets.size());
+    }
+};
+
 // ─── Set face material ───────────────────────────────────────────────────────
 
 struct SetFaceMaterialCommand final : Command {
@@ -143,6 +237,77 @@ private:
             if (auto* be = std::get_if<scene::BrushEntity>(e))
                 if (brushIdx < be->brushes.size() && faceIdx < be->brushes[brushIdx].faces.size())
                     be->brushes[brushIdx].faces[faceIdx].materialId = m;
+    }
+};
+
+// ─── Batch set face material (for drag-to-paint) ────────────────────────────────
+
+struct BatchSetFaceMaterialCommand final : Command {
+    struct FaceRef {
+        scene::EntityId entityId;
+        std::size_t     brushIdx, faceIdx;
+        std::string     oldMat, newMat;
+    };
+
+    std::vector<FaceRef> faces;
+
+    explicit BatchSetFaceMaterialCommand(std::vector<FaceRef> f)
+        : faces(std::move(f)) {}
+
+    void execute(scene::Scene& s) override {
+        for (const auto& f : faces) {
+            if (auto* e = s.getEntity(f.entityId))
+                if (auto* be = std::get_if<scene::BrushEntity>(e))
+                    if (f.brushIdx < be->brushes.size() && f.faceIdx < be->brushes[f.brushIdx].faces.size())
+                        be->brushes[f.brushIdx].faces[f.faceIdx].materialId = f.newMat;
+        }
+    }
+
+    void undo(scene::Scene& s) override {
+        for (const auto& f : faces) {
+            if (auto* e = s.getEntity(f.entityId))
+                if (auto* be = std::get_if<scene::BrushEntity>(e))
+                    if (f.brushIdx < be->brushes.size() && f.faceIdx < be->brushes[f.brushIdx].faces.size())
+                        be->brushes[f.brushIdx].faces[f.faceIdx].materialId = f.oldMat;
+        }
+    }
+
+    std::string describe() const override {
+        if (faces.size() == 1) return std::format("Paint '{}'", faces[0].newMat);
+        return std::format("Paint {} faces", faces.size());
+    }
+};
+
+// ─── Set face UV ─────────────────────────────────────────────────────────────
+// Stores before/after UV state for one face (offset, scale, rotation).
+
+struct SetFaceUVCommand final : Command {
+    scene::EntityId entityId;
+    std::size_t     brushIdx, faceIdx;
+
+    struct UVState { glm::vec2 offset, scale; float rotation; };
+    UVState old_, new_;
+
+    SetFaceUVCommand(scene::EntityId id, std::size_t bi, std::size_t fi,
+                     UVState o, UVState n)
+        : entityId(id), brushIdx(bi), faceIdx(fi), old_(o), new_(n) {}
+
+    void execute(scene::Scene& s) override { apply(s, new_); }
+    void undo   (scene::Scene& s) override { apply(s, old_); }
+    std::string describe() const override  { return "UV edit"; }
+
+private:
+    void apply(scene::Scene& s, const UVState& uv) {
+        if (auto* e = s.getEntity(entityId))
+            if (auto* be = std::get_if<scene::BrushEntity>(e))
+                if (brushIdx < be->brushes.size() &&
+                    faceIdx < be->brushes[brushIdx].faces.size()) {
+                    auto& face = be->brushes[brushIdx].faces[faceIdx];
+                    face.uvOffset   = uv.offset;
+                    face.uvScale    = uv.scale;
+                    face.uvRotation = uv.rotation;
+                    be->brushes[brushIdx].invalidate();
+                }
     }
 };
 
@@ -305,7 +470,152 @@ struct CSGSubtractCommand final : Command {
     std::string describe() const override { return "CSG Subtract"; }
 };
 
-} // namespace forge::editor
+// ─── CSG intersect ───────────────────────────────────────────────────────────
+// Keeps only the overlapping volume of two entities.
+
+struct CSGIntersectCommand final : Command {
+    scene::EntityId         aId, bId;
+    scene::BrushEntity      aData, bData;       // to restore on undo
+    std::vector<scene::EntityId> resultIds;    // intersected fragments
+
+    CSGIntersectCommand(scene::EntityId aid, scene::EntityId bid, 
+                        scene::BrushEntity adata, scene::BrushEntity bdata)
+        : aId(aid), bId(bid), aData(std::move(adata)), bData(std::move(bdata)) {}
+
+    void execute(scene::Scene& s) override {
+        resultIds.clear();
+
+        if (aData.brushes.empty() || bData.brushes.empty()) return;
+
+        std::vector<geo::Brush> intersected;
+        for (const auto& aBrush : aData.brushes) {
+            for (const auto& bBrush : bData.brushes) {
+                auto result = geo::csgIntersect(aBrush, bBrush);
+                for (auto& f : result) intersected.push_back(std::move(f));
+            }
+        }
+
+        if (!intersected.empty()) {
+            scene::BrushEntity re;
+            re.name = std::format("{} ∩ {}", aData.name, bData.name);
+            re.transform = aData.transform;
+            re.brushes = std::move(intersected);
+            resultIds.push_back(s.addEntity(std::move(re)));
+        }
+
+        // Remove original entities
+        s.removeEntity(aId);
+        s.removeEntity(bId);
+    }
+
+    void undo(scene::Scene& s) override {
+        for (auto id : resultIds) s.removeEntity(id);
+        resultIds.clear();
+        s.addEntity(aData);
+        s.addEntity(bData);
+    }
+
+    std::string describe() const override { return "CSG Intersect"; }
+};
+
+// ─── CSG union ────────────────────────────────────────────────────────────────
+// Combines two entities into their union (all parts of either).
+
+struct CSGUnionCommand final : Command {
+    scene::EntityId         aId, bId;
+    scene::BrushEntity      aData, bData;       // to restore on undo
+    std::vector<scene::EntityId> resultIds;    // union fragments
+
+    CSGUnionCommand(scene::EntityId aid, scene::EntityId bid,
+                    scene::BrushEntity adata, scene::BrushEntity bdata)
+        : aId(aid), bId(bid), aData(std::move(adata)), bData(std::move(bdata)) {}
+
+    void execute(scene::Scene& s) override {
+        resultIds.clear();
+
+        if (aData.brushes.empty() || bData.brushes.empty()) {
+            // One is empty, keep the other
+            if (aData.brushes.empty()) s.removeEntity(aId);
+            else s.removeEntity(bId);
+            return;
+        }
+
+        // Compute union: all fragments from both
+        scene::BrushEntity ue;
+        ue.name = std::format("{} ∪ {}", aData.name, bData.name);
+        ue.transform = aData.transform;
+
+        for (const auto& aBrush : aData.brushes) {
+            for (const auto& bBrush : bData.brushes) {
+                auto result = geo::csgUnion(aBrush, bBrush);
+                for (auto& f : result) ue.brushes.push_back(std::move(f));
+            }
+        }
+
+        if (!ue.brushes.empty()) {
+            resultIds.push_back(s.addEntity(std::move(ue)));
+        }
+
+        s.removeEntity(aId);
+        s.removeEntity(bId);
+    }
+
+    void undo(scene::Scene& s) override {
+        for (auto id : resultIds) s.removeEntity(id);
+        resultIds.clear();
+        s.addEntity(aData);
+        s.addEntity(bData);
+    }
+
+    std::string describe() const override { return "CSG Union"; }
+};
+
+// ─── CSG xor ──────────────────────────────────────────────────────────────────
+// Computes symmetric difference (parts in one or other, but not both).
+
+struct CSGXorCommand final : Command {
+    scene::EntityId         aId, bId;
+    scene::BrushEntity      aData, bData;       // to restore on undo
+    std::vector<scene::EntityId> resultIds;    // xor fragments
+
+    CSGXorCommand(scene::EntityId aid, scene::EntityId bid,
+                  scene::BrushEntity adata, scene::BrushEntity bdata)
+        : aId(aid), bId(bid), aData(std::move(adata)), bData(std::move(bdata)) {}
+
+    void execute(scene::Scene& s) override {
+        resultIds.clear();
+
+        if (aData.brushes.empty() || bData.brushes.empty()) return;
+
+        std::vector<geo::Brush> xored;
+        for (const auto& aBrush : aData.brushes) {
+            for (const auto& bBrush : bData.brushes) {
+                auto result = geo::csgXor(aBrush, bBrush);
+                for (auto& f : result) xored.push_back(std::move(f));
+            }
+        }
+
+        if (!xored.empty()) {
+            scene::BrushEntity xe;
+            xe.name = std::format("{} ⊕ {}", aData.name, bData.name);
+            xe.transform = aData.transform;
+            xe.brushes = std::move(xored);
+            resultIds.push_back(s.addEntity(std::move(xe)));
+        }
+
+        s.removeEntity(aId);
+        s.removeEntity(bId);
+    }
+
+    void undo(scene::Scene& s) override {
+        for (auto id : resultIds) s.removeEntity(id);
+        resultIds.clear();
+        s.addEntity(aData);
+        s.addEntity(bData);
+    }
+
+    std::string describe() const override { return "CSG XOR"; }
+};
 
 // ─── Move vertex ─────────────────────────────────────────────────────────────
 // Moves one vertex of a brush by recomputing the adjacent face planes.
@@ -462,3 +772,5 @@ struct DuplicateEntitiesCommand final : Command {
         return std::format("Duplicate {} entities", originals.size());
     }
 };
+
+} // namespace forge::editor

@@ -3,12 +3,12 @@
 // tinygltf — STB implementations are in stb_impl.cpp
 #define TINYGLTF_NO_STB_IMAGE
 #define TINYGLTF_NO_STB_IMAGE_WRITE
-#define TINYGLTF_IMPLEMENTATION
 #include <tiny_gltf.h>
 
 #include <glm/gtc/type_ptr.hpp>
 #include <iostream>
 #include <format>
+#include <numeric>
 
 namespace forge::gfx {
 

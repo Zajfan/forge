@@ -1,7 +1,8 @@
 #include "MaterialEditor.hpp"
 #include <imgui.h>
 #include <glm/glm.hpp>
-#include <fstream>
+#include <glm/gtc/type_ptr.hpp>
+#include <cstring>
 #include <fstream>
 
 namespace forge::editor {
@@ -100,7 +101,11 @@ void MaterialEditor::drawColorProperty(const std::string& label, glm::vec3& colo
 }
 
 void MaterialEditor::drawTextureProperty(const std::string& label, std::string& textureId) noexcept {
-    ImGui::InputText(("##tex_" + label).c_str(), &textureId, ImGuiInputTextFlags_None);
+    char buffer[512] = {};
+    std::snprintf(buffer, sizeof(buffer), "%s", textureId.c_str());
+    if (ImGui::InputText(("##tex_" + label).c_str(), buffer, sizeof(buffer))) {
+        textureId = buffer;
+    }
     ImGui::SameLine();
     if (ImGui::Button(("Browse##" + label).c_str())) {
         // TODO: Open file browser dialog (use portable file dialogs library)
