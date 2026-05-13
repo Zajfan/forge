@@ -1,5 +1,6 @@
 #include "forge/scene/Scene.hpp"
 
+#include <glm/gtx/matrix_decompose.hpp>
 namespace forge::scene {
 
 // ─── BrushEntity ─────────────────────────────────────────────────────────────
@@ -99,6 +100,57 @@ Scene::Stats Scene::stats() const noexcept {
         }, entity);
     }
     return s;
+}
+
+// ─── Scene — entity hierarchy ─────────────────────────────────────────────────
+
+void Scene::setParent(EntityId child, EntityId parent) noexcept {
+    if (parent == kInvalidEntityId)
+        parentMap_.erase(child);
+    else
+        parentMap_[child] = parent;
+}
+
+EntityId Scene::parentOf(EntityId child) const noexcept {
+    const auto it = parentMap_.find(child);
+    return it != parentMap_.end() ? it->second : kInvalidEntityId;
+}
+
+std::vector<EntityId> Scene::childrenOf(EntityId parent) const noexcept {
+    std::vector<EntityId> result;
+    for (const auto& [child, par] : parentMap_)
+        if (par == parent) result.push_back(child);
+    return result;
+}
+
+Transform Scene::worldTransform(EntityId id) const noexcept {
+    // Walk the parent chain and compose transforms
+    // Uses iterative approach to avoid recursion on deep hierarchies
+    std::vector<EntityId> chain;
+    EntityId current = id;
+    while (current != kInvalidEntityId) {
+        chain.push_back(current);
+        current = parentOf(current);
+    }
+
+    // Compose in reverse (root → leaf)
+    glm::dmat4 world(1.0);
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        const Entity* e = getEntity(*it);
+        if (e) world = world * entityTransform(*e).matrix();
+    }
+
+    // Decompose back to Transform
+    Transform result;
+    glm::dvec3 scale, translation, skew;
+    glm::dvec4 perspective;
+    glm::dquat rotation;
+    if (glm::decompose(world, scale, rotation, translation, skew, perspective)) {
+        result.translation = translation;
+        result.rotation    = rotation;
+        result.scale       = scale;
+    }
+    return result;
 }
 
 } // namespace forge::scene

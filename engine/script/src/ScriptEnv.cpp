@@ -175,6 +175,81 @@ void ScriptEnv::bindScene(scene::Scene* scene) noexcept {
     scene_ = scene;
 }
 
+void ScriptEnv::bindPhysicsCallbacks(PhysicsCallbacks cbs) noexcept {
+    bindPhysicsAPI(std::move(cbs));
+}
+
+// ─── Physics API ──────────────────────────────────────────────────────────────
+
+void ScriptEnv::bindPhysicsAPI(PhysicsCallbacks cbs) noexcept {
+    if (!lua_) return;
+    auto& L = *lua_;
+
+    auto forge    = L["forge"].get_or_create<sol::table>();
+    auto phys_tbl = forge.create_named("physics");
+
+    phys_tbl.set_function("raycast",
+        [cb = cbs.raycast](float ox, float oy, float oz,
+                            float dx, float dy, float dz,
+                            float maxDist, sol::this_state s) -> sol::table {
+            sol::state_view L2(s);
+            sol::table result = L2.create_table();
+            if (!cb) { result["hit"] = false; return result; }
+            const auto hit = cb(ox, oy, oz, dx, dy, dz, maxDist);
+            result["hit"] = hit.hit;
+            if (hit.hit) {
+                result["x"] = hit.x; result["y"] = hit.y; result["z"] = hit.z;
+                result["nx"] = hit.nx; result["ny"] = hit.ny; result["nz"] = hit.nz;
+                result["t"] = hit.t;
+            }
+            return result;
+        });
+
+    phys_tbl.set_function("apply_impulse",
+        [cb = cbs.applyImpulse](uint32_t handle, float ix, float iy, float iz) {
+            if (cb) cb(handle, ix, iy, iz);
+        });
+
+    phys_tbl.set_function("get_body_position",
+        [cb = cbs.getBodyPosition](uint32_t handle, sol::this_state s) -> sol::table {
+            sol::state_view L2(s);
+            sol::table result = L2.create_table();
+            if (!cb) return result;
+            const auto [x, y, z] = cb(handle);
+            result["x"] = x; result["y"] = y; result["z"] = z;
+            return result;
+        });
+}
+
+// ─── Event hooks ─────────────────────────────────────────────────────────────
+
+void ScriptEnv::fireOnStart() noexcept {
+    if (!lua_ || !scene_) return;
+    for (const auto& [id, ent] : scene_->entities) {
+        if (const auto* pe = std::get_if<scene::PointEntity>(&ent)) {
+            const auto it = pe->properties.find("script");
+            if (it == pe->properties.end()) continue;
+            const auto* code = std::get_if<std::string>(&it->second);
+            if (!code || code->empty()) continue;
+
+            // Load the script
+            auto load = lua_->safe_script(*code, sol::script_pass_on_error);
+            if (!load.valid()) continue;
+
+            // Call on_start() if defined
+            const sol::optional<sol::function> fn = (*lua_)["on_start"];
+            if (fn) {
+                auto call = fn.value()();
+                if (!call.valid()) {
+                    const sol::error err = call;
+                    log(ConsoleEntry::Kind::Error,
+                        std::format("[on_start entity {}] {}", id, err.what()));
+                }
+            }
+        }
+    }
+}
+
 // ─── Execution ────────────────────────────────────────────────────────────────
 
 bool ScriptEnv::exec(const std::string& code) noexcept {

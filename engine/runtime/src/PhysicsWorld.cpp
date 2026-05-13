@@ -14,6 +14,7 @@
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
@@ -94,6 +95,19 @@ public:
 
 // ─── PhysicsWorld::Impl ───────────────────────────────────────────────────────
 
+// Internal per-body metadata
+struct DynamicBodyEntry {
+    JPH::BodyID joltId;
+};
+
+struct TriggerEntry {
+    JPH::BodyID               joltId;
+    PhysicsWorld::TriggerCallback onEnter;
+    glm::vec3                 position;
+    glm::vec3                 halfExt;
+    bool                      wasOccupied = false;
+};
+
 struct PhysicsWorld::Impl {
     BPLayerInterface                         bpLayer;
     OVBPFilter                               ovbpFilter;
@@ -102,6 +116,14 @@ struct PhysicsWorld::Impl {
     std::unique_ptr<JPH::JobSystemThreadPool> jobSystem;
     std::unique_ptr<JPH::PhysicsSystem>      system;
     std::vector<JPH::BodyID>                 staticBodies;
+
+    // Dynamic bodies
+    PhysicsWorld::BodyHandle                 nextBodyHandle = 0;
+    std::unordered_map<PhysicsWorld::BodyHandle, DynamicBodyEntry> dynamicBodies;
+
+    // Trigger volumes
+    PhysicsWorld::TriggerHandle              nextTriggerHandle = 0;
+    std::unordered_map<PhysicsWorld::TriggerHandle, TriggerEntry> triggers;
 
     // Fixed-step accumulator
     float accumulator = 0.f;
@@ -166,6 +188,16 @@ void PhysicsWorld::shutdown() noexcept {
             bi.DestroyBody(id);
         }
         impl_->staticBodies.clear();
+        for (auto& [h, e] : impl_->dynamicBodies) {
+            bi.RemoveBody(e.joltId);
+            bi.DestroyBody(e.joltId);
+        }
+        impl_->dynamicBodies.clear();
+        for (auto& [h, t] : impl_->triggers) {
+            bi.RemoveBody(t.joltId);
+            bi.DestroyBody(t.joltId);
+        }
+        impl_->triggers.clear();
     }
     impl_.reset();
 }
@@ -248,7 +280,28 @@ void PhysicsWorld::step(float dt) noexcept {
             impl_->tempAlloc.get(), impl_->jobSystem.get());
         impl_->accumulator -= Impl::kStep;
     }
-}
+    // ── Trigger volume overlap checks ──────────────────────────────────────
+    // Simple AABB overlap check against dynamic bodies for trigger callbacks
+    for (auto& [th, trigger] : impl_->triggers) {
+        const glm::vec3 tmin = trigger.position - trigger.halfExt;
+        const glm::vec3 tmax = trigger.position + trigger.halfExt;
+
+        bool occupied = false;
+        for (const auto& [bh, entry] : impl_->dynamicBodies) {
+            const auto& bi = impl_->system->GetBodyInterface();
+            const JPH::Vec3 pos = bi.GetPosition(entry.joltId);
+            const glm::vec3 bp(pos.GetX(), pos.GetY(), pos.GetZ());
+            if (bp.x >= tmin.x && bp.x <= tmax.x &&
+                bp.y >= tmin.y && bp.y <= tmax.y &&
+                bp.z >= tmin.z && bp.z <= tmax.z) {
+                occupied = true;
+                if (!trigger.wasOccupied && trigger.onEnter)
+                    trigger.onEnter(scene::kInvalidEntityId);
+                break;
+            }
+        }
+        trigger.wasOccupied = occupied;
+    }}
 
 // ─── Raycast ─────────────────────────────────────────────────────────────────
 
@@ -278,5 +331,144 @@ PhysicsWorld::raycast(glm::vec3 origin, glm::vec3 dir, float maxDist) const noex
 void* PhysicsWorld::nativeSystem()    const noexcept { return impl_ ? impl_->system.get()    : nullptr; }
 void* PhysicsWorld::nativeTempAlloc() const noexcept { return impl_ ? impl_->tempAlloc.get() : nullptr; }
 int   PhysicsWorld::movingLayer()     const noexcept { return Layers::MOVING; }
+// ─── Dynamic bodies ────────────────────────────────────────────────────────────────
 
+PhysicsWorld::BodyHandle
+PhysicsWorld::addDynamicBody(const geo::Brush& brush,
+                              glm::vec3 position,
+                              float mass) noexcept {
+    if (!impl_) return kInvalidBody;
+
+    const auto& verts = brush.vertices();
+    if (verts.empty()) return kInvalidBody;
+
+    // Build convex hull shape from brush vertices
+    JPH::ConvexHullShapeSettings settings;
+    settings.mPoints.reserve(verts.size());
+    for (const auto& v : verts)
+        settings.mPoints.push_back(JPH::Vec3((float)v.x, (float)v.y, (float)v.z));
+    settings.mMaxConvexRadius = 0.05f;
+
+    auto result = settings.Create();
+    JPH::Ref<JPH::Shape> shape;
+    if (result.HasError()) {
+        // Fallback: unit sphere via settings
+        JPH::SphereShapeSettings ss(16.f);
+        auto sr = ss.Create();
+        if (sr.HasError()) return kInvalidBody;
+        shape = sr.Get();
+    } else {
+        shape = result.Get();
+    }
+
+    JPH::BodyCreationSettings bcs(
+        shape,
+        JPH::RVec3(position.x, position.y, position.z),
+        JPH::Quat::sIdentity(),
+        JPH::EMotionType::Dynamic,
+        Layers::MOVING);
+    bcs.mMassPropertiesOverride.mMass = mass;
+    bcs.mOverrideMassProperties       = JPH::EOverrideMassProperties::CalculateInertia;
+
+    auto& bi = impl_->system->GetBodyInterface();
+    const JPH::BodyID joltId = bi.CreateAndAddBody(bcs, JPH::EActivation::Activate);
+    if (joltId.IsInvalid()) return kInvalidBody;
+
+    const BodyHandle handle = impl_->nextBodyHandle++;
+    impl_->dynamicBodies[handle] = { joltId };
+    return handle;
+}
+
+void PhysicsWorld::applyImpulse(BodyHandle handle, glm::vec3 impulse) noexcept {
+    if (!impl_) return;
+    const auto it = impl_->dynamicBodies.find(handle);
+    if (it == impl_->dynamicBodies.end()) return;
+    impl_->system->GetBodyInterface().AddImpulse(
+        it->second.joltId,
+        JPH::Vec3(impulse.x, impulse.y, impulse.z));
+}
+
+PhysicsWorld::BodyState
+PhysicsWorld::getBodyState(BodyHandle handle) const noexcept {
+    if (!impl_) return {};
+    const auto it = impl_->dynamicBodies.find(handle);
+    if (it == impl_->dynamicBodies.end()) return {};
+
+    const auto& bi = impl_->system->GetBodyInterface();
+    const JPH::Vec3 pos  = bi.GetPosition(it->second.joltId);
+    const JPH::Quat quat = bi.GetRotation(it->second.joltId);
+
+    BodyState state;
+    state.valid    = true;
+    state.position = glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
+    state.rotation = glm::quat(quat.GetW(), quat.GetX(), quat.GetY(), quat.GetZ());
+    return state;
+}
+
+void PhysicsWorld::removeDynamicBody(BodyHandle handle) noexcept {
+    if (!impl_) return;
+    const auto it = impl_->dynamicBodies.find(handle);
+    if (it == impl_->dynamicBodies.end()) return;
+    auto& bi = impl_->system->GetBodyInterface();
+    bi.RemoveBody(it->second.joltId);
+    bi.DestroyBody(it->second.joltId);
+    impl_->dynamicBodies.erase(it);
+}
+
+std::vector<PhysicsWorld::DynamicBodySnapshot>
+PhysicsWorld::snapshotDynamicBodies() const noexcept {
+    if (!impl_) return {};
+    std::vector<DynamicBodySnapshot> out;
+    out.reserve(impl_->dynamicBodies.size());
+    const auto& bi = impl_->system->GetBodyInterface();
+    for (const auto& [handle, entry] : impl_->dynamicBodies) {
+        const JPH::Vec3 pos  = bi.GetPosition(entry.joltId);
+        const JPH::Quat quat = bi.GetRotation(entry.joltId);
+        out.push_back({
+            handle,
+            glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ()),
+            glm::quat(quat.GetW(), quat.GetX(), quat.GetY(), quat.GetZ())
+        });
+    }
+    return out;
+}
+
+// ─── Trigger volumes ─────────────────────────────────────────────────────────────────
+
+PhysicsWorld::TriggerHandle
+PhysicsWorld::addTriggerVolume(glm::vec3 position,
+                                glm::vec3 halfExt,
+                                TriggerCallback onEnter) noexcept {
+    if (!impl_) return kInvalidTrigger;
+
+    // Triggers are sensor bodies (no collision response, just overlap detection)
+    JPH::Ref<JPH::BoxShape> shape = new JPH::BoxShape(
+        JPH::Vec3(halfExt.x, halfExt.y, halfExt.z));
+
+    JPH::BodyCreationSettings bcs(
+        shape,
+        JPH::RVec3(position.x, position.y, position.z),
+        JPH::Quat::sIdentity(),
+        JPH::EMotionType::Static,
+        Layers::STATIC);
+    bcs.mIsSensor = true;
+
+    auto& bi = impl_->system->GetBodyInterface();
+    const JPH::BodyID joltId = bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+    if (joltId.IsInvalid()) return kInvalidTrigger;
+
+    const TriggerHandle handle = impl_->nextTriggerHandle++;
+    impl_->triggers[handle] = { joltId, std::move(onEnter), position, halfExt, false };
+    return handle;
+}
+
+void PhysicsWorld::removeTriggerVolume(TriggerHandle handle) noexcept {
+    if (!impl_) return;
+    const auto it = impl_->triggers.find(handle);
+    if (it == impl_->triggers.end()) return;
+    auto& bi = impl_->system->GetBodyInterface();
+    bi.RemoveBody(it->second.joltId);
+    bi.DestroyBody(it->second.joltId);
+    impl_->triggers.erase(it);
+}
 } // namespace forge::runtime

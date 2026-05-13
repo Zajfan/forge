@@ -2871,6 +2871,29 @@ void EditorApp::runPlayFrame() {
     // Step runtime (physics + player)
     runtime_->update(dt, window_.input());
 
+    // Respawn if player falls below kill plane
+    {
+        static constexpr float kKillPlane = -2048.f;
+        if (runtime_->playerPosition().y < kKillPlane) {
+            glm::vec3 spawnPos = glm::vec3(camera_.target);
+            auto [id, pe] = scene_.findByClassname("info_player_start");
+            if (pe) spawnPos = glm::vec3(pe->transform.translation);
+            runtime_->teleportPlayer(spawnPos);
+        }
+    }
+
+    // Crouch toggle (Left Ctrl)
+    {
+        static bool crouchHeld = false;
+        const bool ctrlDown = window_.input().keys.ctrl;
+        if (ctrlDown && !crouchHeld) {
+            runtime_->toggleCrouch();
+            crouchHeld = true;
+        } else if (!ctrlDown) {
+            crouchHeld = false;
+        }
+    }
+
     // Render full-screen (no FBO, no docking — covers entire window)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, window_.width(), window_.height());
@@ -2958,10 +2981,11 @@ void EditorApp::drawPlayHUD() {
     ImGui::Text("pos  %.0f  %.0f  %.0f", pos.x, pos.y, pos.z);
     ImGui::Text("yaw  %.0f°", runtime_->playerYaw());
     ImGui::Text("gnd  %s", runtime_->playerOnGround() ? "yes" : "no");
+    ImGui::Text("cro  %s", runtime_->playerCrouched() ? "yes" : "no");
 
     ImGui::Separator();
     ImGui::TextDisabled("WASD  move    Q/E  jump");
-    ImGui::TextDisabled("Shift  sprint");
+    ImGui::TextDisabled("Shift  sprint  Ctrl  crouch");
     ImGui::TextDisabled("ESC  stop");
 
     ImGui::End();

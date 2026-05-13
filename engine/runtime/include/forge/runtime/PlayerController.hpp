@@ -58,10 +58,18 @@ struct PlayerController {
     [[nodiscard]] glm::vec3 eyePosition()  const noexcept;
     [[nodiscard]] bool      onGround()     const noexcept;
     [[nodiscard]] bool      valid()        const noexcept;
+    [[nodiscard]] bool      crouched()     const noexcept { return crouched_; }
+
+    /// Instantly teleport the player to world position (respawn).
+    void teleport(PhysicsWorld& physics, glm::vec3 pos) noexcept;
+
+    /// Toggle crouch — halves eye height and movement speed.
+    void toggleCrouch() noexcept;
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    bool crouched_ = false;
 };
 
 } // namespace forge::runtime

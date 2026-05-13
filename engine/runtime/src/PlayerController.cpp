@@ -178,4 +178,28 @@ bool PlayerController::onGround() const noexcept {
     return impl_ && impl_->onGround_;
 }
 
+// ─── Teleport ────────────────────────────────────────────────────────────────
+
+void PlayerController::teleport(PhysicsWorld& physics, glm::vec3 pos) noexcept {
+    if (!valid()) return;
+    // Place capsule centre above the foot position
+    const float centreY = pos.y + Impl::kHalfHeight + Impl::kRadius;
+    impl_->character->SetPosition(JPH::RVec3(pos.x, centreY, pos.z));
+    impl_->character->SetLinearVelocity(JPH::Vec3::sZero());
+    impl_->onGround_ = false;
+}
+
+// ─── Crouch ───────────────────────────────────────────────────────────────────
+
+void PlayerController::toggleCrouch() noexcept {
+    crouched_ = !crouched_;
+    if (crouched_) {
+        eyeHeight  = 80.f;   // half standing eye height
+        walkSpeed  = 110.f;  // half walk speed while crouched
+    } else {
+        eyeHeight  = 160.f;
+        walkSpeed  = 220.f;
+    }
+}
+
 } // namespace forge::runtime

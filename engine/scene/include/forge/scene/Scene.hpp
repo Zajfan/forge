@@ -121,12 +121,34 @@ struct Scene {
 
     [[nodiscard]] Stats stats() const noexcept;
 
+    // ── Entity hierarchy ──────────────────────────────────────────────────────
+
+    /// Set a parent-child relationship. Pass kInvalidEntityId to detach.
+    /// Cycles are not checked — callers must prevent them.
+    void setParent(EntityId child, EntityId parent) noexcept;
+
+    /// Get the parent of an entity, or kInvalidEntityId if it has none.
+    [[nodiscard]] EntityId parentOf(EntityId child) const noexcept;
+
+    /// Get direct children of an entity.
+    [[nodiscard]] std::vector<EntityId> childrenOf(EntityId parent) const noexcept;
+
+    /// Return true if `entity` is a root (no parent).
+    [[nodiscard]] bool isRoot(EntityId entity) const noexcept {
+        return parentOf(entity) == kInvalidEntityId;
+    }
+
+    /// Compute the cumulative world-space transform by walking the parent chain.
+    [[nodiscard]] Transform worldTransform(EntityId id) const noexcept;
+
     // ── Clear ─────────────────────────────────────────────────────────────────
 
-    void clear() noexcept { entities.clear(); nextId_ = 1; }
+    void clear() noexcept { entities.clear(); parentMap_.clear(); nextId_ = 1; }
 
 private:
     EntityId nextId_ = 1;
+    /// parent: child → parent (only entries for children with a parent)
+    std::map<EntityId, EntityId> parentMap_;
 };
 
 } // namespace forge::scene

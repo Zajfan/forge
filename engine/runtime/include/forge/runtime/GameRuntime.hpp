@@ -5,6 +5,8 @@
 #include <forge/scene.hpp>
 #include <forge/gfx/Window.hpp>
 
+namespace forge::script { class ScriptEnv; }
+
 namespace forge::runtime {
 
 /// Orchestrates physics, player, and camera for play mode.
@@ -19,6 +21,9 @@ namespace forge::runtime {
 struct GameRuntime {
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    GameRuntime();
+    ~GameRuntime();
 
     /// Build physics world from scene geometry and spawn player.
     /// @param scene     The current editor scene (read-only during play).
@@ -45,10 +50,22 @@ struct GameRuntime {
     [[nodiscard]] glm::vec3 playerPosition() const noexcept;
     [[nodiscard]] bool      playerOnGround() const noexcept;
     [[nodiscard]] float     playerYaw()      const noexcept;
+    [[nodiscard]] bool      playerCrouched() const noexcept;
+
+    /// Instantly move the player to a new world position (respawn).
+    void teleportPlayer(glm::vec3 pos) noexcept;
+
+    /// Toggle the player crouch state (half capsule height / eye offset).
+    void toggleCrouch() noexcept;
+
+    /// Access the live script environment for the console panel.
+    [[nodiscard]] script::ScriptEnv& scriptEnv() noexcept;
 
 private:
-    PhysicsWorld    physics_;
-    PlayerController player_;
+    PhysicsWorld      physics_;
+    PlayerController  player_;
+    std::unique_ptr<script::ScriptEnv> scripts_;
+    scene::Scene*     scene_ = nullptr;  ///< non-owning pointer to editor scene
 };
 
 } // namespace forge::runtime

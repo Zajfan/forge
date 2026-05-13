@@ -22,6 +22,7 @@ target_link_libraries(forge-runtime
         forge_compile_options
     PRIVATE
         Jolt::Jolt
+        forge::script      # GameRuntime.cpp uses ScriptEnv (one-way: script has no link dep on runtime)
 )
 
 target_compile_features(forge-runtime PUBLIC cxx_std_23)

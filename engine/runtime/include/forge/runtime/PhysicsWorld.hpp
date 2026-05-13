@@ -4,6 +4,8 @@
 #include <glm/glm.hpp>
 #include <memory>
 #include <optional>
+#include <vector>
+#include <functional>
 
 namespace forge::runtime {
 
@@ -56,6 +58,56 @@ struct PhysicsWorld {
 
     [[nodiscard]] std::optional<RayHit>
     raycast(glm::vec3 origin, glm::vec3 dir, float maxDist) const noexcept;
+
+    // ── Dynamic bodies ────────────────────────────────────────────────────────
+
+    using BodyHandle = uint32_t;
+    static constexpr BodyHandle kInvalidBody = UINT32_MAX;
+
+    /// Add a dynamic rigid body from a brush at the given world position.
+    /// @param brush        Convex hull shape source
+    /// @param position     Initial world-space position
+    /// @param mass         Mass in kg (default 10 kg)
+    /// @returns A BodyHandle to track and remove the body later
+    [[nodiscard]] BodyHandle addDynamicBody(
+        const geo::Brush& brush,
+        glm::vec3 position,
+        float mass = 10.f) noexcept;
+
+    /// Apply an impulse to a dynamic body (world-space direction, kg*units/s).
+    void applyImpulse(BodyHandle handle, glm::vec3 impulse) noexcept;
+
+    /// Get the current world-space transform of a dynamic body.
+    struct BodyState { glm::vec3 position; glm::quat rotation; bool valid = false; };
+    [[nodiscard]] BodyState getBodyState(BodyHandle handle) const noexcept;
+
+    /// Remove a dynamic body.
+    void removeDynamicBody(BodyHandle handle) noexcept;
+
+    /// Collect all dynamic body states (call after step to sync scene).
+    struct DynamicBodySnapshot {
+        BodyHandle handle;
+        glm::vec3  position;
+        glm::quat  rotation;
+    };
+    [[nodiscard]] std::vector<DynamicBodySnapshot> snapshotDynamicBodies() const noexcept;
+
+    // ── Trigger volumes ───────────────────────────────────────────────────────
+
+    using TriggerHandle = uint32_t;
+    static constexpr TriggerHandle kInvalidTrigger = UINT32_MAX;
+    using TriggerCallback = std::function<void(scene::EntityId)>;
+
+    /// Add an AABB trigger volume at position with half-extents.
+    /// @param position  Center of the trigger in world space
+    /// @param halfExt   Half-extents (size / 2) of the AABB box
+    /// @param onEnter   Callback invoked when a MOVING body enters
+    [[nodiscard]] TriggerHandle addTriggerVolume(
+        glm::vec3 position,
+        glm::vec3 halfExt,
+        TriggerCallback onEnter) noexcept;
+
+    void removeTriggerVolume(TriggerHandle handle) noexcept;
 
     // ── Native handles (needed by PlayerController .cpp only) ─────────────────
     /// Returns JPH::PhysicsSystem* — cast in callers that include Jolt headers.

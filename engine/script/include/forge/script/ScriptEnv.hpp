@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <functional>
 
+namespace forge::runtime { struct PhysicsWorld; }
+
 // Forward-declare sol/Lua types
 namespace sol { class state; }
 
@@ -27,15 +29,10 @@ struct ConsoleEntry {
 ///   - Interactive script console (type + execute Lua in the editor)
 ///   - Per-entity script execution in play mode (update() called each frame)
 ///   - forge.scene API (query/mutate entities)
+///   - forge.physics API (apply_impulse, get_position, raycast)
 ///   - forge.log (print to console)
 ///   - forge.input (key state in play mode)
-///
-/// Usage:
-///   env.init();
-///   env.bindScene(scene, &audioEngine);   // call once per play session
-///   env.exec("forge.log('hello')");       // interactive console
-///   env.updateEntity(entityId, code, dt); // per-entity per-frame
-///   env.shutdown();
+///   - Game event callbacks: on_start, on_collision
 class ScriptEnv {
 public:
     ScriptEnv();
@@ -56,7 +53,24 @@ public:
     /// Must be called before exec() or updateEntity().
     void bindScene(scene::Scene* scene) noexcept;
 
-    // ── Execution ─────────────────────────────────────────────────────────────
+    /// Physics callbacks — registered by GameRuntime (which owns PhysicsWorld).
+    struct PhysicsCallbacks {
+        /// Returns {hit, x, y, z, nx, ny, nz, t} or nullopt if no hit.
+        struct RaycastResult { bool hit=false; float x,y,z,nx,ny,nz,t; };
+        std::function<RaycastResult(float ox,float oy,float oz,
+                                    float dx,float dy,float dz,
+                                    float maxDist)>       raycast;
+        std::function<void(uint32_t handle,
+                           float ix,float iy,float iz)>   applyImpulse;
+        std::function<std::tuple<float,float,float>
+                      (uint32_t handle)>                  getBodyPosition;
+    };
+
+    /// Wire up the physics Lua API using pre-bound callbacks.
+    /// Call during play mode init after GameRuntime::init().
+    void bindPhysicsCallbacks(PhysicsCallbacks cbs) noexcept;
+
+    // ── Execution ────────────────────────────────────────────────────────────────
 
     /// Execute a Lua code snippet.  Output captured in consoleLog().
     /// @returns true on success, false on Lua error.
@@ -66,6 +80,10 @@ public:
     /// Expects `code` to define a global function `update(dt)`.
     /// Called every frame for entities that have a "script" property.
     bool updateEntity(scene::EntityId id, const std::string& code, float dt) noexcept;
+
+    /// Fire the on_start event for all entities with scripts.
+    /// Call once when entering play mode.
+    void fireOnStart() noexcept;
 
     // ── Script file loading ───────────────────────────────────────────────────
 
@@ -79,12 +97,13 @@ public:
     void clearLog() noexcept { log_.clear(); }
 
 private:
-    std::unique_ptr<sol::state> lua_;
-    scene::Scene*               scene_ = nullptr;
-    std::vector<ConsoleEntry>   log_;
+    std::unique_ptr<sol::state>   lua_;
+    scene::Scene*                 scene_   = nullptr;
+    std::vector<ConsoleEntry>     log_;
 
     void log(ConsoleEntry::Kind kind, const std::string& text);
     void bindForgeAPI() noexcept;
+    void bindPhysicsAPI(PhysicsCallbacks cbs) noexcept;
 };
 
 } // namespace forge::script
