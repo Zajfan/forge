@@ -229,19 +229,48 @@ void GameRuntime::registerSceneTriggers() noexcept {
     if (!scene_) return;
 
     for (const auto& [id, ent] : scene_->entities) {
-        const auto* pe = std::get_if<scene::PointEntity>(&ent);
-        if (!pe) continue;
-        if (pe->classname != "trigger_once" && pe->classname != "trigger_multiple") continue;
-
+        std::string classname;
+        glm::vec3 pos(0.f);
         glm::vec3 halfExt(64.f, 64.f, 64.f);
-        if (const auto v = propAsVec3(*pe, "size"); v.has_value()) {
-            halfExt = glm::abs(*v) * 0.5f;
+        float wait = 0.2f;
+        float delay = 0.f;
+        std::string target;
+        std::string message;
+
+        if (const auto* be = std::get_if<scene::BrushEntity>(&ent)) {
+            classname = be->classname;
+            if (classname != "trigger_once" && classname != "trigger_multiple") continue;
+
+            const geo::AABB wb = be->worldBounds();
+            if (!wb.isValid()) continue;
+            pos = glm::vec3(wb.center());
+            halfExt = glm::max(glm::vec3(wb.extents()) * 0.5f, glm::vec3(1.f));
+
+            wait = std::max(0.f, propAsFloat(*be, "wait", 0.2f));
+            delay = std::max(0.f, propAsFloat(*be, "delay", 0.f));
+            target = propAsString(*be, "target");
+            message = propAsString(*be, "message");
+        } else if (const auto* pe = std::get_if<scene::PointEntity>(&ent)) {
+            // Backward compatibility for older scenes using point trigger entities.
+            classname = pe->classname;
+            if (classname != "trigger_once" && classname != "trigger_multiple") continue;
+
+            if (const auto v = propAsVec3(*pe, "size"); v.has_value()) {
+                halfExt = glm::abs(*v) * 0.5f;
+            } else {
+                const float radius = propAsFloat(*pe, "radius", 0.f);
+                if (radius > 0.f) halfExt = glm::vec3(radius);
+            }
+            pos = glm::vec3(pe->transform.translation);
+
+            wait = std::max(0.f, propAsFloat(*pe, "wait", 0.2f));
+            delay = std::max(0.f, propAsFloat(*pe, "delay", 0.f));
+            target = propAsString(*pe, "target");
+            message = propAsString(*pe, "message");
         } else {
-            const float radius = propAsFloat(*pe, "radius", 0.f);
-            if (radius > 0.f) halfExt = glm::vec3(radius);
+            continue;
         }
 
-        const glm::vec3 pos = glm::vec3(pe->transform.translation);
         const auto handle = physics_.addTriggerVolume(
             pos,
             halfExt,
@@ -252,12 +281,12 @@ void GameRuntime::registerSceneTriggers() noexcept {
         TriggerRuntime t;
         t.entityId = id;
         t.handle = handle;
-        t.once = (pe->classname == "trigger_once");
-        t.wait = std::max(0.f, propAsFloat(*pe, "wait", 0.2f));
-        t.delay = std::max(0.f, propAsFloat(*pe, "delay", 0.f));
-        t.target = propAsString(*pe, "target");
-        t.message = propAsString(*pe, "message");
-        t.classname = pe->classname;
+        t.once = (classname == "trigger_once");
+        t.wait = wait;
+        t.delay = delay;
+        t.target = std::move(target);
+        t.message = std::move(message);
+        t.classname = std::move(classname);
         t.position = pos;
         t.nextFireTime = 0.f;
 
