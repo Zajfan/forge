@@ -4096,10 +4096,13 @@ void EditorApp::drawScriptConsole() {
     ImGui::SetNextWindowSize({560.f, 360.f}, ImGuiCond_FirstUseEver);
     ImGui::Begin("Script Console", &showScriptConsole_);
 
+    script::ScriptEnv* env = &scriptEnv_;
+    if (playMode_ && runtime_) env = &runtime_->scriptEnv();
+
     // Toolbar
-    if (ImGui::Button("Clear")) scriptEnv_.clearLog();
+    if (ImGui::Button("Clear")) env->clearLog();
     ImGui::SameLine();
-    if (ImGui::Button("Reload Scene Binding")) scriptEnv_.bindScene(&scene_);
+    if (ImGui::Button("Reload Scene Binding")) env->bindScene(&scene_);
     ImGui::SameLine();
     ImGui::TextDisabled("Lua 5.4  |  forge.* API  |  Enter=exec");
     ImGui::Separator();
@@ -4108,7 +4111,7 @@ void EditorApp::drawScriptConsole() {
     ImGui::BeginChild("##log", {0.f, -ImGui::GetFrameHeightWithSpacing() - 4.f},
                        false, ImGuiWindowFlags_HorizontalScrollbar);
 
-    for (const auto& entry : scriptEnv_.consoleLog()) {
+    for (const auto& entry : env->consoleLog()) {
         ImVec4 col;
         const char* prefix = "";
         switch (entry.kind) {
@@ -4138,7 +4141,7 @@ void EditorApp::drawScriptConsole() {
     ImGui::SameLine();
     if (ImGui::Button("Run") || execute) {
         if (scriptInput_[0]) {
-            scriptEnv_.exec(scriptInput_);
+            env->exec(scriptInput_);
             scriptInput_[0] = '\0'; // clear after execution
             ImGui::SetKeyboardFocusHere(-1);
         }

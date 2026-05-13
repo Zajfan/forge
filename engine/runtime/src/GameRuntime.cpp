@@ -55,6 +55,8 @@ bool GameRuntime::init(const scene::Scene& scene, glm::vec3 spawnPos) noexcept {
     };
     scripts_->bindPhysicsCallbacks(std::move(cbs));
     scripts_->fireOnStart();
+    elapsedSeconds_ = 0.f;
+    wasOnGround_ = player_.onGround();
 
     return true;
 }
@@ -64,12 +66,23 @@ void GameRuntime::shutdown() noexcept {
     player_.shutdown();
     physics_.shutdown();
     scene_ = nullptr;
+    elapsedSeconds_ = 0.f;
+    wasOnGround_ = false;
 }
 
 void GameRuntime::update(float dt, const gfx::InputState& input) noexcept {
     if (!physics_.valid()) return;
+    elapsedSeconds_ += dt;
+    scripts_->setTime(dt, elapsedSeconds_);
+
     player_.update(dt, input, physics_);
     physics_.step(dt);
+
+    const bool onGroundNow = player_.onGround();
+    if (!wasOnGround_ && onGroundNow) {
+        scripts_->fireEvent("on_collision", scene::kInvalidEntityId);
+    }
+    wasOnGround_ = onGroundNow;
 
     // Run per-entity scripts
     if (scene_) {

@@ -66,6 +66,8 @@ private:
     PlayerController  player_;
     std::unique_ptr<script::ScriptEnv> scripts_;
     scene::Scene*     scene_ = nullptr;  ///< non-owning pointer to editor scene
+    float             elapsedSeconds_ = 0.f;
+    bool              wasOnGround_    = false;
 };
 
 } // namespace forge::runtime

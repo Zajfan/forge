@@ -81,9 +81,17 @@ public:
     /// Called every frame for entities that have a "script" property.
     bool updateEntity(scene::EntityId id, const std::string& code, float dt) noexcept;
 
+    /// Update forge.time fields exposed to Lua.
+    void setTime(float dt, float elapsed) noexcept;
+
     /// Fire the on_start event for all entities with scripts.
     /// Call once when entering play mode.
     void fireOnStart() noexcept;
+
+    /// Fire a named global event function (e.g. on_collision, on_trigger).
+    /// Calls matching function in each scripted point entity, if present.
+    void fireEvent(const std::string& name,
+                   scene::EntityId source = scene::kInvalidEntityId) noexcept;
 
     // ── Script file loading ───────────────────────────────────────────────────
 

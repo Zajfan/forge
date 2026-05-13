@@ -157,7 +157,8 @@ void ScriptEnv::bindForgeAPI() noexcept {
 
     // ── forge.time ───────────────────────────────────────────────────────────
     auto time_tbl = forge.create_named("time");
-    time_tbl["dt"] = 0.016f; // updated each frame before calling update()
+    time_tbl["dt"]      = 0.016f; // updated each frame before calling update()
+    time_tbl["elapsed"] = 0.f;
 
     // ── Utility ──────────────────────────────────────────────────────────────
     forge.set_function("clamp", [](float v, float lo, float hi) {
@@ -278,7 +279,7 @@ bool ScriptEnv::updateEntity(scene::EntityId id,
 {
     if (!lua_) return false;
 
-    // Update dt in forge.time
+    // Update dt in forge.time (elapsed is managed by setTime)
     (*lua_)["forge"]["time"]["dt"] = dt;
     (*lua_)["forge"]["__entity_id"] = static_cast<uint64_t>(id);
 
@@ -298,6 +299,38 @@ bool ScriptEnv::updateEntity(scene::EntityId id,
         return false;
     }
     return true;
+}
+
+void ScriptEnv::setTime(float dt, float elapsed) noexcept {
+    if (!lua_) return;
+    (*lua_)["forge"]["time"]["dt"]      = dt;
+    (*lua_)["forge"]["time"]["elapsed"] = elapsed;
+}
+
+void ScriptEnv::fireEvent(const std::string& name, scene::EntityId source) noexcept {
+    if (!lua_ || !scene_) return;
+
+    for (const auto& [id, ent] : scene_->entities) {
+        if (const auto* pe = std::get_if<scene::PointEntity>(&ent)) {
+            const auto it = pe->properties.find("script");
+            if (it == pe->properties.end()) continue;
+            const auto* code = std::get_if<std::string>(&it->second);
+            if (!code || code->empty()) continue;
+
+            auto load = lua_->safe_script(*code, sol::script_pass_on_error);
+            if (!load.valid()) continue;
+
+            const sol::optional<sol::function> fn = (*lua_)[name];
+            if (!fn) continue;
+
+            auto call = fn.value()(static_cast<uint64_t>(source));
+            if (!call.valid()) {
+                const sol::error err = call;
+                log(ConsoleEntry::Kind::Error,
+                    std::format("[{} entity {}] {}", name, id, err.what()));
+            }
+        }
+    }
 }
 
 bool ScriptEnv::loadFile(const std::filesystem::path& path) noexcept {
