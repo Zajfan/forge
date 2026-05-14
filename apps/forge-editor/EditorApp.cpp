@@ -3198,25 +3198,33 @@ void EditorApp::drawPlayHUD() {
             ImGui::TextDisabled("No runtime triggers");
         } else {
             for (const auto& t : triggers) {
-                const char* insideText = t.inside ? "IN" : "OUT";
-                const ImVec4 insideCol = t.inside ? ImVec4{0.40f, 1.0f, 0.40f, 1.f}
-                                                  : ImVec4{1.00f, 0.55f, 0.55f, 1.f};
                 ImGui::PushID(static_cast<int>(t.entityId));
                 ImGui::Text("#%llu  %s", static_cast<unsigned long long>(t.entityId), t.classname.c_str());
                 if (!t.target.empty()) ImGui::TextDisabled("target: %s", t.target.c_str());
-                ImGui::TextColored(insideCol, "state: %s", insideText);
-                ImGui::Text("filter classname: %s  (%s)",
+                ImGui::Text("filters: classname %s (%s) | team %s (%s)",
                             t.filterClassname.empty() ? "*" : t.filterClassname.c_str(),
-                            t.classFilterPass ? "pass" : "fail");
-                ImGui::Text("filter team: %s  (%s)",
+                            t.classFilterPass ? "pass" : "fail",
                             t.filterTeam.empty() ? "*" : t.filterTeam.c_str(),
                             t.teamFilterPass ? "pass" : "fail");
-                ImGui::Text("once=%s once_per_entity=%s fired=%s fired_for_player=%s",
+                ImGui::Text("flags: once=%s once_per_entity=%s fired=%s",
                             t.once ? "yes" : "no",
                             t.oncePerEntity ? "yes" : "no",
-                            t.fired ? "yes" : "no",
-                            t.firedForPlayer ? "yes" : "no");
-                ImGui::Text("enter_fires=%u exit_fires=%u", t.enterFireCount, t.exitFireCount);
+                            t.fired ? "yes" : "no");
+
+                if (t.occupants.empty()) {
+                    ImGui::TextDisabled("  (no occupants)");
+                } else {
+                    ImGui::Indent();
+                    for (const auto& occ : t.occupants) {
+                        const ImVec4 col = occ.firedForThis ? ImVec4{1.0f, 0.8f, 0.2f, 1.f}
+                                                           : ImVec4{0.6f, 0.8f, 1.0f, 1.f};
+                        ImGui::TextColored(col, "  occupant #%llu (fired=%s)",
+                                          static_cast<unsigned long long>(occ.entityId),
+                                          occ.firedForThis ? "yes" : "no");
+                    }
+                    ImGui::Unindent();
+                }
+
                 ImGui::Separator();
                 ImGui::PopID();
             }

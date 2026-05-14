@@ -721,15 +721,21 @@ std::vector<GameRuntime::TriggerDebugInfo> GameRuntime::triggerDebugSnapshot() c
         d.target = t.target;
         d.filterClassname = t.filterClassname;
         d.filterTeam = t.filterTeam;
-        d.inside = t.occupants.count(kPlayerOccupant) > 0;
-        d.classFilterPass = t.lastClassFilterPass;
-        d.teamFilterPass = t.lastTeamFilterPass;
         d.fired = t.fired;
         d.once = t.once;
         d.oncePerEntity = t.oncePerEntity;
-        d.firedForPlayer = t.firedOccupants.count(kPlayerOccupant) > 0;
-        d.enterFireCount = t.enterFireCount;
-        d.exitFireCount = t.exitFireCount;
+        d.classFilterPass = t.lastClassFilterPass;
+        d.teamFilterPass = t.lastTeamFilterPass;
+
+        d.occupants.reserve(t.occupants.size());
+        for (const auto& occupantId : t.occupants) {
+            OccupantDebugInfo o;
+            o.entityId = occupantId;
+            o.firedForThis = t.firedOccupants.count(occupantId) > 0;
+            o.fireCount = (occupantId == kPlayerOccupant) ? t.enterFireCount : 0;
+            d.occupants.push_back(std::move(o));
+        }
+
         out.push_back(std::move(d));
     }
 

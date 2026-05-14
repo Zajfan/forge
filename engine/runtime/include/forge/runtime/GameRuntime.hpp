@@ -24,21 +24,24 @@ namespace forge::runtime {
 ///   rt.shutdown();
 struct GameRuntime {
 
+    struct OccupantDebugInfo {
+        scene::EntityId entityId;
+        bool            firedForThis = false;
+        uint32_t        fireCount = 0;
+    };
+
     struct TriggerDebugInfo {
         scene::EntityId entityId = scene::kInvalidEntityId;
         std::string     classname;
         std::string     target;
         std::string     filterClassname;
         std::string     filterTeam;
-        bool            inside = false;
-        bool            classFilterPass = true;
-        bool            teamFilterPass = true;
         bool            fired = false;
         bool            once = false;
         bool            oncePerEntity = false;
-        bool            firedForPlayer = false;
-        uint32_t        enterFireCount = 0;
-        uint32_t        exitFireCount = 0;
+        bool            classFilterPass = true;
+        bool            teamFilterPass = true;
+        std::vector<OccupantDebugInfo> occupants;
     };
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
