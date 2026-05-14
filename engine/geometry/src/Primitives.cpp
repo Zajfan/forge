@@ -210,12 +210,10 @@ Brush makeTorus(glm::dvec3 center, double majorRadius, double minorRadius, int m
             const double minCos = std::cos(minAngle);
             const double minSin = std::sin(minAngle);
 
-            // Point on the torus surface
-            const double px = majCos * (majorRadius + minorRadius * minCos);
-            const double py = minorRadius * minSin;
-            const double pz = majSin * (majorRadius + minorRadius * minCos);
-
-            circles[maj].push_back(center + glm::dvec3{px, py, pz});
+            // Offset the cross-section circle along local radial/up axes.
+            const glm::dvec3 radial = glm::dvec3{majCos, 0.0, majSin};
+            const glm::dvec3 up = glm::dvec3{0.0, 1.0, 0.0};
+            circles[maj].push_back(circleCenter + radial * (minorRadius * minCos) + up * (minorRadius * minSin));
         }
     }
 

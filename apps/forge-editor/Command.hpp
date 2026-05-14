@@ -84,6 +84,39 @@ struct AddBrushEntityCommand final : Command {
     std::string describe() const override { return std::format("Add '{}'", entity.name); }
 };
 
+// ─── Add brush to existing brush entity ─────────────────────────────────────
+
+struct AddBrushToEntityCommand final : Command {
+    scene::EntityId entityId = scene::kInvalidEntityId;
+    geo::Brush      brush;
+    std::size_t     addedIndex = 0;
+    bool            added = false;
+
+    AddBrushToEntityCommand(scene::EntityId id, geo::Brush b)
+        : entityId(id), brush(std::move(b)) {}
+
+    void execute(scene::Scene& s) override {
+        auto* entity = s.getEntity(entityId);
+        auto* be = entity ? std::get_if<scene::BrushEntity>(entity) : nullptr;
+        if (!be) return;
+        addedIndex = be->brushes.size();
+        be->brushes.push_back(brush);
+        added = true;
+    }
+
+    void undo(scene::Scene& s) override {
+        if (!added) return;
+        auto* entity = s.getEntity(entityId);
+        auto* be = entity ? std::get_if<scene::BrushEntity>(entity) : nullptr;
+        if (!be || addedIndex >= be->brushes.size()) return;
+        be->brushes.erase(be->brushes.begin() + static_cast<std::ptrdiff_t>(addedIndex));
+    }
+
+    std::string describe() const override {
+        return std::format("Add brush to entity {}", entityId);
+    }
+};
+
 // ─── Delete entity ───────────────────────────────────────────────────────────
 
 struct DeleteEntityCommand final : Command {

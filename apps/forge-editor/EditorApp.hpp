@@ -83,6 +83,12 @@ private:
     void applyClip();
     void savePrefabFromSelection();
     void insertPrefab();
+    void drawPrefabBrowser();
+    void refreshPrefabLibrary();
+    scene::EntityId placePrefabFromFile(const std::filesystem::path& prefabPath,
+                                        const glm::dvec3& spawnPos,
+                                        bool linked);
+    void updateLinkedPrefabInstances();
     void applyCSGSubtract();
     void applyCSGUnion();
     void applyCSGIntersect();
@@ -261,7 +267,14 @@ private:
     bool                 showMaterialBrowser_ = false;
     bool                 showUndoHistory_ = false;
     bool                 showEntityClasses_ = false;
+    bool                 showPrefabBrowser_ = false;
     std::filesystem::path currentFile_;
+
+    std::filesystem::path prefabLibraryRoot_;
+    std::vector<std::filesystem::path> prefabLibraryFiles_;
+    std::unordered_map<scene::EntityId, std::filesystem::path> linkedPrefabSources_;
+    char                 prefabSearch_[128] = {};
+    char                 prefabRootBuffer_[512] = {};
 
     glm::vec3 gizmoDragStartPos_ = {};
     bool      gizmoDragging_     = false;

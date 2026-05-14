@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <chrono>
 #include <functional>
+#include <cctype>
 #include <limits>
 #include <sstream>
 #include <unordered_set>
@@ -271,6 +272,9 @@ bool EditorApp::init() {
     orthoCams_[1].dir = gfx::OrthoCamera::Dir::Front;
     orthoCams_[2].dir = gfx::OrthoCamera::Dir::Right;
     materialEditor_.setMaterialLibrary(&materialLibrary_);
+    prefabLibraryRoot_ = std::filesystem::current_path();
+    std::snprintf(prefabRootBuffer_, sizeof(prefabRootBuffer_), "%s", prefabLibraryRoot_.string().c_str());
+    refreshPrefabLibrary();
     buildDefaultScene();
     return true;
 }
@@ -462,21 +466,12 @@ void EditorApp::extrudeSelectedFace(double distance) {
         extruded.faces.push_back({ side, brush.faces[faceSelection_.faceIdx].materialId });
     }
 
-    scene::BrushEntity e;
-    e.name = "extrude";
-    e.brushes = { std::move(extruded) };
-    auto cmd = std::make_unique<AddBrushEntityCommand>(std::move(e));
-    auto* cmdPtr = cmd.get();
-    commands_.push(std::move(cmd), scene_);
-    if (cmdPtr->addedId != scene::kInvalidEntityId) {
-        entityLayers_[cmdPtr->addedId] = entityLayer(faceSelection_.entityId);
-        entityGroups_[cmdPtr->addedId] = entityGroup(faceSelection_.entityId);
-        rebuildEntityMesh(cmdPtr->addedId);
-        selection_.set(cmdPtr->addedId);
-        faceSelection_.clear();
-        vertexSelection_.clear();
-    }
-    setStatus(std::format("Extruded face by {:.0f}", distance));
+    commands_.push(std::make_unique<AddBrushToEntityCommand>(faceSelection_.entityId, std::move(extruded)), scene_);
+    rebuildEntityMesh(faceSelection_.entityId);
+    selection_.set(faceSelection_.entityId);
+    faceSelection_.clear();
+    vertexSelection_.clear();
+    setStatus(std::format("Extruded face by {:.0f} (in-place)", distance));
 }
 
 void EditorApp::insetSelectedFace(double insetAmount, double depth) {
@@ -546,21 +541,12 @@ void EditorApp::insetSelectedFace(double insetAmount, double depth) {
         return;
     }
 
-    scene::BrushEntity e;
-    e.name = "inset";
-    e.brushes = { std::move(insetBrush) };
-    auto cmd = std::make_unique<AddBrushEntityCommand>(std::move(e));
-    auto* cmdPtr = cmd.get();
-    commands_.push(std::move(cmd), scene_);
-    if (cmdPtr->addedId != scene::kInvalidEntityId) {
-        entityLayers_[cmdPtr->addedId] = entityLayer(faceSelection_.entityId);
-        entityGroups_[cmdPtr->addedId] = entityGroup(faceSelection_.entityId);
-        rebuildEntityMesh(cmdPtr->addedId);
-        selection_.set(cmdPtr->addedId);
-        faceSelection_.clear();
-        vertexSelection_.clear();
-    }
-    setStatus(std::format("Inset face {:.0f}, depth {:.0f}", insetAmount, depth));
+    commands_.push(std::make_unique<AddBrushToEntityCommand>(faceSelection_.entityId, std::move(insetBrush)), scene_);
+    rebuildEntityMesh(faceSelection_.entityId);
+    selection_.set(faceSelection_.entityId);
+    faceSelection_.clear();
+    vertexSelection_.clear();
+    setStatus(std::format("Inset face {:.0f}, depth {:.0f} (in-place)", insetAmount, depth));
 }
 
 void EditorApp::bridgeSelectedFaces() {
@@ -867,6 +853,7 @@ void EditorApp::drawFrame() {
     if (showEntityClasses_)   drawEntityClassBrowser();
     if (showValidation_)      drawValidationPanel();
     if (showBSPStats_)        drawBSPPanel();
+    if (showPrefabBrowser_)   drawPrefabBrowser();
     if (showScriptConsole_)   drawScriptConsole();
     if (showBloomSettings_)   drawBloomSettings();
     if (showAudioSettings_)   drawAudioSettings();
@@ -988,6 +975,7 @@ void EditorApp::drawMainMenuBar() {
         drawAddPrimitivesMenu();
         ImGui::Separator();
         if (ImGui::MenuItem("Insert Prefab...")) insertPrefab();
+        ImGui::MenuItem("Prefab Browser", nullptr, &showPrefabBrowser_);
         ImGui::EndMenu();
     }
 
@@ -1017,6 +1005,7 @@ void EditorApp::drawMainMenuBar() {
             !hiddenEntities_.empty() || !isolatedEntities_.empty())) clearHiddenIsolation();
         ImGui::Separator();
         ImGui::MenuItem("Material Editor", nullptr, &showMaterialEditor_);
+        ImGui::MenuItem("Prefab Browser",  nullptr, &showPrefabBrowser_);
         ImGui::MenuItem("Undo History",     nullptr, &showUndoHistory_);
         ImGui::MenuItem("Entity Classes",   nullptr, &showEntityClasses_);
         ImGui::MenuItem("Validation",       nullptr, &showValidation_);
@@ -1413,6 +1402,22 @@ void EditorApp::drawViewport() {
 
     const ImVec2 vpPos = ImGui::GetCursorScreenPos();
     ImGui::Image(toImTextureID(displayTex), sz, {0.f,1.f}, {1.f,0.f});
+
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("FORGE_PREFAB_PATH")) {
+            const auto* raw = static_cast<const char*>(payload->Data);
+            const std::filesystem::path prefabPath(raw ? raw : "");
+            const glm::dvec3 spawn = viewportSpawnPoint(vpPos, sz);
+            placePrefabFromFile(prefabPath, spawn, false);
+        }
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("FORGE_PREFAB_PATH_LINKED")) {
+            const auto* raw = static_cast<const char*>(payload->Data);
+            const std::filesystem::path prefabPath(raw ? raw : "");
+            const glm::dvec3 spawn = viewportSpawnPoint(vpPos, sz);
+            placePrefabFromFile(prefabPath, spawn, true);
+        }
+        ImGui::EndDragDropTarget();
+    }
 
     // TrenchBroom-style quick creation at cursor: Ctrl + Right Click
     if (ImGui::IsItemHovered() && ImGui::GetIO().KeyCtrl &&
@@ -4008,38 +4013,151 @@ void EditorApp::insertPrefab() {
     auto sel = pfd::open_file("Open Prefab", std::filesystem::current_path().string(),
         { "FORGE Prefab", "*.fprefab", "All Files", "*" }).result();
     if (sel.empty()) return;
-    std::filesystem::path found = sel[0];
+    placePrefabFromFile(sel[0], glm::dvec3(camera_.target), false);
+}
 
-    auto result = loadPrefab(found);
+scene::EntityId EditorApp::placePrefabFromFile(const std::filesystem::path& prefabPath,
+                                               const glm::dvec3& spawnPos,
+                                               bool linked) {
+    auto result = loadPrefab(prefabPath);
     if (!result) {
         setStatus(std::format("Prefab load failed: {}", result.error()));
-        return;
+        return scene::kInvalidEntityId;
     }
 
-    const glm::dvec3 spawnPos = glm::dvec3(camera_.target);
-    
-    // Use new instantiation options (position only, for now)
     PrefabInstantiationOptions opts;
     opts.position = spawnPos;
-    // layer_override is not set, so it uses the prefab's default layer
-    
+
     auto e = instantiatePrefab(*result, opts);
     const auto id = scene_.addEntity(std::move(e));
-    
-    // Set up editor metadata
+
     entityLayers_[id] = result->layer;
-    entityGroups_[id] = "";  // New instances get no group by default
-    
-    // Ensure layer exists in visibility/lock maps
+    entityGroups_[id] = "";
+    if (linked) linkedPrefabSources_[id] = std::filesystem::absolute(prefabPath);
+
     if (!layerVisibility_.contains(result->layer)) {
         layerVisibility_[result->layer] = true;
         layerLocked_[result->layer] = false;
         layerTint_[result->layer] = {1.f, 1.f, 1.f};
     }
-    
+
     rebuildEntityMesh(id);
     selection_.set(id);
-    setStatus(std::format("Inserted prefab '{}'", result->name));
+    setStatus(std::format("Inserted prefab '{}'{}", result->name, linked ? " (linked)" : ""));
+    return id;
+}
+
+void EditorApp::refreshPrefabLibrary() {
+    prefabLibraryFiles_.clear();
+    if (prefabLibraryRoot_.empty() || !std::filesystem::exists(prefabLibraryRoot_)) return;
+
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(prefabLibraryRoot_)) {
+        if (!entry.is_regular_file()) continue;
+        if (entry.path().extension() == ".fprefab") prefabLibraryFiles_.push_back(entry.path());
+    }
+    std::sort(prefabLibraryFiles_.begin(), prefabLibraryFiles_.end());
+}
+
+void EditorApp::updateLinkedPrefabInstances() {
+    std::size_t updated = 0;
+    std::size_t removed = 0;
+
+    for (auto it = linkedPrefabSources_.begin(); it != linkedPrefabSources_.end();) {
+        auto* entity = scene_.getEntity(it->first);
+        auto* be = entity ? std::get_if<scene::BrushEntity>(entity) : nullptr;
+        if (!be) {
+            it = linkedPrefabSources_.erase(it);
+            ++removed;
+            continue;
+        }
+
+        auto prefab = loadPrefab(it->second);
+        if (!prefab) {
+            ++it;
+            continue;
+        }
+
+        be->brushes = prefab->brushes;
+        be->solid = prefab->solid;
+        be->visible = prefab->visible;
+        entityLayers_[it->first] = prefab->layer;
+        rebuildEntityMesh(it->first);
+        ++updated;
+        ++it;
+    }
+
+    setStatus(std::format("Updated {} linked prefabs{}",
+                          updated,
+                          removed ? std::format(" ({} stale links removed)", removed) : ""));
+}
+
+void EditorApp::drawPrefabBrowser() {
+    ImGui::SetNextWindowSize({420.f, 520.f}, ImGuiCond_FirstUseEver);
+    ImGui::Begin("Prefab Browser", &showPrefabBrowser_);
+
+    ImGui::SetNextItemWidth(-110.f);
+    ImGui::InputText("##prefab_root", prefabRootBuffer_, sizeof(prefabRootBuffer_));
+    ImGui::SameLine();
+    if (ImGui::Button("Set Root")) {
+        prefabLibraryRoot_ = prefabRootBuffer_;
+        refreshPrefabLibrary();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh")) refreshPrefabLibrary();
+
+    ImGui::SetNextItemWidth(-1.f);
+    ImGui::InputTextWithHint("##prefab_search", "Search prefabs...", prefabSearch_, sizeof(prefabSearch_));
+    ImGui::TextDisabled("%zu prefab(s)", prefabLibraryFiles_.size());
+    ImGui::Separator();
+
+    auto toLower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    };
+    const std::string filter = toLower(prefabSearch_);
+
+    ImGui::BeginChild("##prefab_list", {0.f, -ImGui::GetFrameHeightWithSpacing() * 2.5f}, true);
+    for (const auto& path : prefabLibraryFiles_) {
+        const std::string name = path.stem().string();
+        const std::string rel = std::filesystem::relative(path, prefabLibraryRoot_).string();
+        const std::string hay = toLower(name + " " + rel);
+        if (!filter.empty() && hay.find(filter) == std::string::npos) continue;
+
+        ImGui::PushID(path.string().c_str());
+        ImGui::TextUnformatted(name.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Place")) placePrefabFromFile(path, glm::dvec3(camera_.target), false);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Link")) placePrefabFromFile(path, glm::dvec3(camera_.target), true);
+        ImGui::TextDisabled("%s", rel.c_str());
+
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+            const std::string abs = std::filesystem::absolute(path).string();
+            const bool linkedDrag = ImGui::GetIO().KeyShift;
+            ImGui::SetDragDropPayload(linkedDrag ? "FORGE_PREFAB_PATH_LINKED" : "FORGE_PREFAB_PATH",
+                                      abs.c_str(),
+                                      abs.size() + 1);
+            ImGui::Text("Drag to viewport: %s", name.c_str());
+            ImGui::TextDisabled("Hold Shift while dragging to create linked instance");
+            ImGui::EndDragDropSource();
+        }
+        ImGui::Separator();
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+
+    if (ImGui::Button("Update Linked Instances")) updateLinkedPrefabInstances();
+    ImGui::SameLine();
+    if (ImGui::Button("Clear Broken Links")) {
+        for (auto it = linkedPrefabSources_.begin(); it != linkedPrefabSources_.end();) {
+            if (!scene_.getEntity(it->first)) it = linkedPrefabSources_.erase(it);
+            else ++it;
+        }
+        setStatus(std::format("Linked instances tracked: {}", linkedPrefabSources_.size()));
+    }
+    ImGui::TextDisabled("Linked instances tracked: %zu", linkedPrefabSources_.size());
+
+    ImGui::End();
 }
 
 } // namespace forge::editor — Phase 8 panels
