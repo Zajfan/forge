@@ -1040,6 +1040,9 @@ void EditorApp::drawMainMenuBar() {
 
 void EditorApp::drawAddPrimitivesMenu() {
     static int pSides = 6, ySides = 4;
+    static int cylSides = 32, coneSides = 32;
+    static int sphLat = 16, sphLon = 32;
+    static int torMajor = 24, torMinor = 16;
     const glm::dvec3 spawn = glm::dvec3(camera_.target);
 
     if (ImGui::MenuItem("Box (64³)"))
@@ -1047,14 +1050,50 @@ void EditorApp::drawAddPrimitivesMenu() {
     if (ImGui::MenuItem("Wedge (64³)"))
         addPrimitiveEntity("wedge", geo::makeWedge({-32,0,-32},{32,64,32}), spawn);
     ImGui::Separator();
+    
+    // Prism
     ImGui::SetNextItemWidth(70); ImGui::InputInt("##ps",&pSides); pSides=std::clamp(pSides,3,32);
     ImGui::SameLine();
     if (ImGui::MenuItem(std::format("{}-Prism",pSides).c_str()))
         addPrimitiveEntity(std::format("{}_prism",pSides), geo::makePrism({0,0,0},32.,64.,pSides), spawn);
+    
+    // Pyramid
     ImGui::SetNextItemWidth(70); ImGui::InputInt("##ys",&ySides); ySides=std::clamp(ySides,3,32);
     ImGui::SameLine();
     if (ImGui::MenuItem(std::format("{}-Pyramid",ySides).c_str()))
         addPrimitiveEntity(std::format("{}_pyramid",ySides), geo::makePyramid({0,0,0},32.,64.,ySides), spawn);
+    
+    ImGui::Separator();
+    
+    // Cylinder
+    ImGui::SetNextItemWidth(70); ImGui::InputInt("##cyl",&cylSides); cylSides=std::clamp(cylSides,3,64);
+    ImGui::SameLine();
+    if (ImGui::MenuItem("Cylinder"))
+        addPrimitiveEntity("cylinder", geo::makeCylinder({0,0,0},32.,64.,cylSides), spawn);
+    
+    // Cone
+    ImGui::SetNextItemWidth(70); ImGui::InputInt("##cone",&coneSides); coneSides=std::clamp(coneSides,3,64);
+    ImGui::SameLine();
+    if (ImGui::MenuItem("Cone"))
+        addPrimitiveEntity("cone", geo::makeCone({0,0,0},32.,64.,coneSides), spawn);
+    
+    ImGui::Separator();
+    
+    // Sphere
+    ImGui::SetNextItemWidth(50); ImGui::InputInt("##slat",&sphLat); sphLat=std::clamp(sphLat,3,32);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(50); ImGui::InputInt("##slon",&sphLon); sphLon=std::clamp(sphLon,3,64);
+    ImGui::SameLine();
+    if (ImGui::MenuItem("Sphere"))
+        addPrimitiveEntity("sphere", geo::makeSphere({0,0,0},32.,sphLat,sphLon), spawn);
+    
+    // Torus
+    ImGui::SetNextItemWidth(50); ImGui::InputInt("##tmaj",&torMajor); torMajor=std::clamp(torMajor,3,64);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(50); ImGui::InputInt("##tmin",&torMinor); torMinor=std::clamp(torMinor,3,32);
+    ImGui::SameLine();
+    if (ImGui::MenuItem("Torus"))
+        addPrimitiveEntity("torus", geo::makeTorus({0,0,0},48.,16.,torMajor,torMinor), spawn);
 }
 
 // ─── Toolbar ──────────────────────────────────────────────────────────────────

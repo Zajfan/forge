@@ -37,4 +37,50 @@ namespace forge::geo {
     double     height,
     int        sides) noexcept;
 
+/// Create a cylinder (N-sided prism with many sides for smooth appearance).
+/// @param center      Centre of the base face (bottom).
+/// @param radius      Radius of the cylinder.
+/// @param height      Height along the +Y axis.
+/// @param sides       Number of sides (default 32 for smooth appearance). Clamped to minimum 3.
+[[nodiscard]] Brush makeCylinder(
+    glm::dvec3 center,
+    double     radius,
+    double     height,
+    int        sides = 32) noexcept;
+
+/// Create a cone (N-sided pyramid with many sides for smooth appearance).
+/// @param baseCenter  Centre of the base face.
+/// @param radius      Base radius of the cone.
+/// @param height      Height from base to apex along +Y.
+/// @param sides       Number of base sides (default 32 for smooth appearance). Clamped to minimum 3.
+[[nodiscard]] Brush makeCone(
+    glm::dvec3 baseCenter,
+    double     radius,
+    double     height,
+    int        sides = 32) noexcept;
+
+/// Create a UV-sphere (tessellated sphere using latitude/longitude segments).
+/// @param center              Centre of the sphere.
+/// @param radius              Radius of the sphere.
+/// @param latitudeSegments    Number of latitude divisions (rings). Clamped to minimum 3.
+/// @param longitudeSegments   Number of longitude divisions (slices). Clamped to minimum 3.
+[[nodiscard]] Brush makeSphere(
+    glm::dvec3 center,
+    double     radius,
+    int        latitudeSegments = 16,
+    int        longitudeSegments = 32) noexcept;
+
+/// Create a torus (donut shape) lying flat on the XZ plane.
+/// @param center              Centre of the torus.
+/// @param majorRadius         Radius from center to tube center.
+/// @param minorRadius         Radius of the tube itself.
+/// @param majorSegments       Number of segments around the major circle. Clamped to minimum 3.
+/// @param minorSegments       Number of segments around the minor circle. Clamped to minimum 3.
+[[nodiscard]] Brush makeTorus(
+    glm::dvec3 center,
+    double     majorRadius,
+    double     minorRadius,
+    int        majorSegments = 24,
+    int        minorSegments = 16) noexcept;
+
 } // namespace forge::geo
