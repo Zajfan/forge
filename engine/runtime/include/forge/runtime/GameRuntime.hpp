@@ -24,6 +24,23 @@ namespace forge::runtime {
 ///   rt.shutdown();
 struct GameRuntime {
 
+    struct TriggerDebugInfo {
+        scene::EntityId entityId = scene::kInvalidEntityId;
+        std::string     classname;
+        std::string     target;
+        std::string     filterClassname;
+        std::string     filterTeam;
+        bool            inside = false;
+        bool            classFilterPass = true;
+        bool            teamFilterPass = true;
+        bool            fired = false;
+        bool            once = false;
+        bool            oncePerEntity = false;
+        bool            firedForPlayer = false;
+        uint32_t        enterFireCount = 0;
+        uint32_t        exitFireCount = 0;
+    };
+
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     GameRuntime();
@@ -55,6 +72,8 @@ struct GameRuntime {
     [[nodiscard]] bool      playerOnGround() const noexcept;
     [[nodiscard]] float     playerYaw()      const noexcept;
     [[nodiscard]] bool      playerCrouched() const noexcept;
+    [[nodiscard]] const std::string& playerTeam() const noexcept;
+    [[nodiscard]] std::vector<TriggerDebugInfo> triggerDebugSnapshot() const;
 
     /// Instantly move the player to a new world position (respawn).
     void teleportPlayer(glm::vec3 pos) noexcept;
@@ -83,6 +102,11 @@ private:
         std::string                   filterClassname;  ///< filter: only trigger on matching entities
         std::string                   filterTeam;       ///< filter: only trigger on matching team
         bool                          oncePerEntity = false; ///< if true, each entity can fire once
+        bool                          lastInside = false;
+        bool                          lastClassFilterPass = true;
+        bool                          lastTeamFilterPass = true;
+        uint32_t                      enterFireCount = 0;
+        uint32_t                      exitFireCount = 0;
         bool                          useGeometry = false;  ///< if true, use precise brush geometry test
         std::vector<geo::Brush>       triggerBrushes;   ///< brush geometry for precise testing
         scene::Transform              triggerTransform; ///< transform for brush geometry
@@ -134,6 +158,7 @@ private:
     gfx::InputState   prevInput_{};
     gfx::InputState   currentInput_{};
     bool              hasInputHistory_ = false;
+    std::string       playerTeam_ = "";
     std::vector<TriggerRuntime> triggers_;
     std::unordered_map<scene::EntityId, std::size_t> triggerIndex_;
     std::vector<PendingTriggerFire> pendingTriggerFires_;

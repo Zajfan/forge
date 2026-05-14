@@ -295,6 +295,7 @@ private:
     // ── Play mode state ───────────────────────────────────────────────────────
     bool                             playMode_ = false;
     std::unique_ptr<runtime::GameRuntime> runtime_;
+    bool                             showTriggerDebugOverlay_ = true;
 
     // ── Status bar ────────────────────────────────────────────────────────────
     std::string statusMessage_;

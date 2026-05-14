@@ -81,3 +81,19 @@ catch_discover_tests(test-gfx
     TEST_PREFIX  "gfx."
     REPORTER     console
 )
+
+# ── Runtime tests ────────────────────────────────────────────────────────────
+add_executable(test-runtime
+    runtime/test_trigger_runtime.cpp
+)
+
+target_link_libraries(test-runtime
+    PRIVATE
+        forge::runtime
+        Catch2::Catch2WithMain
+)
+
+catch_discover_tests(test-runtime
+    TEST_PREFIX  "runtime."
+    REPORTER     console
+)

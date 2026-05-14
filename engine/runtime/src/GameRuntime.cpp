@@ -6,6 +6,7 @@
 #include <cmath>
 #include <iostream>
 #include <format>
+#include <limits>
 #include <optional>
 #include <sstream>
 
@@ -74,6 +75,29 @@ bool propAsBool(const EntityT& entity, const std::string& key, bool fallback) {
         return lower == "1" || lower == "true" || lower == "yes" || lower == "on";
     }
     return fallback;
+}
+
+std::string resolvePlayerTeamFromScene(const scene::Scene& scene, glm::vec3 spawnPos) {
+    std::string resolved;
+    double bestDistSq = std::numeric_limits<double>::max();
+
+    for (const auto& [id, ent] : scene.entities) {
+        (void)id;
+        const auto* pe = std::get_if<scene::PointEntity>(&ent);
+        if (!pe || pe->classname != "info_player_start") continue;
+
+        const std::string team = propAsString(*pe, "team");
+        if (team.empty()) continue;
+
+        const glm::vec3 delta = glm::vec3(pe->transform.translation) - spawnPos;
+        const double distSq = static_cast<double>(glm::dot(delta, delta));
+        if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            resolved = team;
+        }
+    }
+
+    return resolved;
 }
 
 std::optional<glm::vec3> vec3FromString(const std::string& text) {
@@ -152,6 +176,7 @@ bool GameRuntime::init(const scene::Scene& scene, glm::vec3 spawnPos) noexcept {
         return false;
     }
     scripts_->bindScene(scene_);
+    playerTeam_ = resolvePlayerTeamFromScene(scene, spawnPos);
 
     // Wire physics callbacks (full PhysicsWorld type available here)
     script::ScriptEnv::PhysicsCallbacks cbs;
@@ -208,6 +233,7 @@ void GameRuntime::shutdown() noexcept {
     elapsedSeconds_ = 0.f;
     wasOnGround_ = false;
     hasInputHistory_ = false;
+    playerTeam_.clear();
     triggers_.clear();
     triggerIndex_.clear();
     pendingTriggerFires_.clear();
@@ -570,7 +596,7 @@ void GameRuntime::updateTriggerOccupancy() noexcept {
 
     constexpr scene::EntityId kPlayerOccupant = scene::kInvalidEntityId;
     const std::string playerClassname = "player";
-    const std::string playerTeam = "player";
+    const std::string& playerTeam = playerTeam_;
     const glm::dvec3 playerPos = glm::dvec3(player_.footPosition());
 
     for (auto& trigger : triggers_) {
@@ -594,13 +620,17 @@ void GameRuntime::updateTriggerOccupancy() noexcept {
             playerInside = dist <= defaultRadius;
         }
 
-        // Check filter classname
-        if (!classNameMatches(playerClassname, trigger.filterClassname) ||
-            !classNameMatches(playerTeam, trigger.filterTeam)) {
+        const bool classPass = classNameMatches(playerClassname, trigger.filterClassname);
+        const bool teamPass = classNameMatches(playerTeam, trigger.filterTeam);
+        trigger.lastClassFilterPass = classPass;
+        trigger.lastTeamFilterPass = teamPass;
+
+        if (!classPass || !teamPass) {
             playerInside = false;
         }
 
         bool wasInside = trigger.occupants.count(kPlayerOccupant) > 0;
+        trigger.lastInside = playerInside;
 
         if (playerInside && !wasInside) {
             // Player entered the trigger
@@ -616,6 +646,7 @@ void GameRuntime::updateTriggerOccupancy() noexcept {
                 } else {
                     pendingTriggerFires_.push_back({ trigger.entityId, elapsedSeconds_ });
                 }
+                ++trigger.enterFireCount;
 
                 trigger.firedOccupants.insert(kPlayerOccupant);
 
@@ -641,6 +672,7 @@ void GameRuntime::updateTriggerOccupancy() noexcept {
             args.hasPosition = true;
             args.isExit = true;
             scripts_->fireEvent("on_trigger_exit", args);
+            ++trigger.exitFireCount;
         }
     }
 }
@@ -671,6 +703,37 @@ float GameRuntime::playerYaw() const noexcept {
 
 bool GameRuntime::playerCrouched() const noexcept {
     return player_.crouched();
+}
+
+const std::string& GameRuntime::playerTeam() const noexcept {
+    return playerTeam_;
+}
+
+std::vector<GameRuntime::TriggerDebugInfo> GameRuntime::triggerDebugSnapshot() const {
+    constexpr scene::EntityId kPlayerOccupant = scene::kInvalidEntityId;
+    std::vector<TriggerDebugInfo> out;
+    out.reserve(triggers_.size());
+
+    for (const auto& t : triggers_) {
+        TriggerDebugInfo d;
+        d.entityId = t.entityId;
+        d.classname = t.classname;
+        d.target = t.target;
+        d.filterClassname = t.filterClassname;
+        d.filterTeam = t.filterTeam;
+        d.inside = t.occupants.count(kPlayerOccupant) > 0;
+        d.classFilterPass = t.lastClassFilterPass;
+        d.teamFilterPass = t.lastTeamFilterPass;
+        d.fired = t.fired;
+        d.once = t.once;
+        d.oncePerEntity = t.oncePerEntity;
+        d.firedForPlayer = t.firedOccupants.count(kPlayerOccupant) > 0;
+        d.enterFireCount = t.enterFireCount;
+        d.exitFireCount = t.exitFireCount;
+        out.push_back(std::move(d));
+    }
+
+    return out;
 }
 
 void GameRuntime::teleportPlayer(glm::vec3 pos) noexcept {

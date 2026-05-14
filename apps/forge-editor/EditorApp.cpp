@@ -1007,6 +1007,7 @@ void EditorApp::drawMainMenuBar() {
         ImGui::Separator();
         ImGui::MenuItem("Audio Settings",nullptr, &showAudioSettings_);
         ImGui::MenuItem("Script Console",nullptr, &showScriptConsole_);
+        ImGui::MenuItem("Trigger Debug Overlay", nullptr, &showTriggerDebugOverlay_);
         ImGui::Separator();
         if (ImGui::MenuItem("Frame All","F")) camera_.frameAABB(scene_.worldBounds());
         ImGui::MenuItem("Orthographic Edit Mode", nullptr, &orthoEditMode_);
@@ -3186,6 +3187,41 @@ void EditorApp::drawPlayHUD() {
     ImGui::TextDisabled("WASD  move    Q/E  jump");
     ImGui::TextDisabled("Shift  sprint  Ctrl  crouch");
     ImGui::TextDisabled("ESC  stop");
+    ImGui::Checkbox("Trigger debug overlay", &showTriggerDebugOverlay_);
+
+    if (showTriggerDebugOverlay_) {
+        const auto triggers = runtime_->triggerDebugSnapshot();
+        ImGui::SeparatorText("Triggers");
+        ImGui::Text("player team: %s", runtime_->playerTeam().empty() ? "<unset>" : runtime_->playerTeam().c_str());
+
+        if (triggers.empty()) {
+            ImGui::TextDisabled("No runtime triggers");
+        } else {
+            for (const auto& t : triggers) {
+                const char* insideText = t.inside ? "IN" : "OUT";
+                const ImVec4 insideCol = t.inside ? ImVec4{0.40f, 1.0f, 0.40f, 1.f}
+                                                  : ImVec4{1.00f, 0.55f, 0.55f, 1.f};
+                ImGui::PushID(static_cast<int>(t.entityId));
+                ImGui::Text("#%llu  %s", static_cast<unsigned long long>(t.entityId), t.classname.c_str());
+                if (!t.target.empty()) ImGui::TextDisabled("target: %s", t.target.c_str());
+                ImGui::TextColored(insideCol, "state: %s", insideText);
+                ImGui::Text("filter classname: %s  (%s)",
+                            t.filterClassname.empty() ? "*" : t.filterClassname.c_str(),
+                            t.classFilterPass ? "pass" : "fail");
+                ImGui::Text("filter team: %s  (%s)",
+                            t.filterTeam.empty() ? "*" : t.filterTeam.c_str(),
+                            t.teamFilterPass ? "pass" : "fail");
+                ImGui::Text("once=%s once_per_entity=%s fired=%s fired_for_player=%s",
+                            t.once ? "yes" : "no",
+                            t.oncePerEntity ? "yes" : "no",
+                            t.fired ? "yes" : "no",
+                            t.firedForPlayer ? "yes" : "no");
+                ImGui::Text("enter_fires=%u exit_fires=%u", t.enterFireCount, t.exitFireCount);
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+        }
+    }
 
     ImGui::End();
 }
