@@ -3083,18 +3083,26 @@ void EditorApp::drawCSGPreviewOverlay() {
     } else {
         for (const auto& info : csgPreview_.entities) {
             ImGui::PushID(static_cast<int>(info.entityId));
-            const ImVec4 titleCol = info.participates ? ImVec4{0.55f, 0.90f, 1.0f, 1.f}
-                                                     : ImVec4{0.75f, 0.75f, 0.75f, 1.f};
-            ImGui::TextColored(titleCol, "%s", info.label.c_str());
+            const bool hasWarnings = !info.warnings.empty();
+            const ImVec4 rowCol = info.participates
+                ? (hasWarnings ? ImVec4{1.00f, 0.82f, 0.25f, 1.f} : ImVec4{0.35f, 0.95f, 0.45f, 1.f})
+                : ImVec4{0.65f, 0.65f, 0.65f, 1.f};
+            const char* status = info.participates
+                ? (hasWarnings ? "warning" : "participating")
+                : "skipped";
+
+            ImGui::PushStyleColor(ImGuiCol_Text, rowCol);
+            ImGui::Text("%s [%s]", info.label.c_str(), status);
             ImGui::Indent();
             ImGui::Text("brushes: %zu  result brushes: %zu", info.sourceBrushCount, info.resultBrushCount);
             if (info.warnings.empty()) {
                 ImGui::TextDisabled("No warnings");
             } else {
                 for (const auto& warn : info.warnings)
-                    ImGui::TextColored({1.f, 0.72f, 0.25f, 1.f}, "%s", warn.c_str());
+                    ImGui::Text("%s", warn.c_str());
             }
             ImGui::Unindent();
+            ImGui::PopStyleColor();
             ImGui::Separator();
             ImGui::PopID();
         }
