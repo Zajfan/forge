@@ -857,6 +857,7 @@ void EditorApp::drawFrame() {
     if (showScriptConsole_)   drawScriptConsole();
     if (showBloomSettings_)   drawBloomSettings();
     if (showAudioSettings_)   drawAudioSettings();
+    if (csgPreview_.active)   drawCSGPreviewOverlay();
 }
 
 // ─── Dock layout ─────────────────────────────────────────────────────────────
@@ -941,14 +942,14 @@ void EditorApp::drawMainMenuBar() {
             reconcileEditorState();
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("CSG Subtract (selection=cutter)",nullptr,false,!selection_.empty()))
-            applyCSGSubtract();
-        if (ImGui::MenuItem("CSG Union (select 2 entities)", nullptr, false, selection_.ids.size() == 2))
-            applyCSGUnion();
-        if (ImGui::MenuItem("CSG Intersect (select 2 entities)", nullptr, false, selection_.ids.size() == 2))
-            applyCSGIntersect();
-        if (ImGui::MenuItem("CSG XOR (select 2 entities)", nullptr, false, selection_.ids.size() == 2))
-            applyCSGXor();
+        if (ImGui::MenuItem("CSG Subtract Preview (selection=cutter)",nullptr,false,!selection_.empty()))
+            beginCSGPreviewSubtract();
+        if (ImGui::MenuItem("CSG Union Preview (select 2 entities)", nullptr, false, selection_.ids.size() == 2))
+            beginCSGPreviewUnion();
+        if (ImGui::MenuItem("CSG Intersect Preview (select 2 entities)", nullptr, false, selection_.ids.size() == 2))
+            beginCSGPreviewIntersect();
+        if (ImGui::MenuItem("CSG XOR Preview (select 2 entities)", nullptr, false, selection_.ids.size() == 2))
+            beginCSGPreviewXor();
         ImGui::Separator();
         if (ImGui::MenuItem("Duplicate Selected", "Ctrl+D", false, !selection_.empty()))
             duplicateSelection();
@@ -1378,6 +1379,19 @@ void EditorApp::drawViewport() {
             });
         }
     }
+
+    if (csgPreview_.active) {
+        for (const auto& pd : csgPreview_.meshes) {
+            for (const auto& sub : pd.mesh.submeshes) {
+                renderer_.submit({
+                    .mesh = &sub,
+                    .modelMatrix = pd.model,
+                    .material = makeEditorMaterial(materialLibrary_, sub.materialId(), {0.15f, 0.95f, 0.95f}),
+                });
+            }
+        }
+    }
+
     drawMeshEntities(frame);
     renderer_.endFrame();
 
@@ -2329,9 +2343,9 @@ void EditorApp::drawSceneTree() {
                     const auto* be = std::get_if<scene::BrushEntity>(&entity);
                     camera_.frameAABB(be->worldBounds());
                 }
-                if (isBE && ImGui::MenuItem("CSG Subtract (this=cutter)")) {
+                if (isBE && ImGui::MenuItem("CSG Subtract Preview (this=cutter)")) {
                     selection_.set(id);
-                    applyCSGSubtract();
+                    beginCSGPreviewSubtract();
                 }
                 ImGui::EndPopup();
             }
@@ -2516,9 +2530,9 @@ void EditorApp::drawProperties() {
         ImGui::SeparatorText("Operations");
 
         // CSG Subtract
-        if (ImGui::Button("CSG Subtract (this=cutter)", {-1.f, 0.f}))
-            applyCSGSubtract();
-        ImGui::SetItemTooltip("Carves this entity out of all overlapping solid brushes, then removes it.");
+        if (ImGui::Button("CSG Subtract Preview (this=cutter)", {-1.f, 0.f}))
+            beginCSGPreviewSubtract();
+        ImGui::SetItemTooltip("Previews carving this entity out of overlapping solid brushes. Use Apply/Cancel in the preview bar.");
 
         // Hollow
         if (be->brushes.size() == 1) {
@@ -2827,6 +2841,211 @@ void EditorApp::applyClip() {
 }
 
 // ─── Apply: CSG subtract ─────────────────────────────────────────────────────
+
+void EditorApp::beginCSGPreviewSubtract() {
+    csgPreview_.active = true;
+    csgPreview_.op = CSGPreviewOp::Subtract;
+    rebuildCSGPreview();
+}
+
+void EditorApp::beginCSGPreviewUnion() {
+    csgPreview_.active = true;
+    csgPreview_.op = CSGPreviewOp::Union;
+    rebuildCSGPreview();
+}
+
+void EditorApp::beginCSGPreviewIntersect() {
+    csgPreview_.active = true;
+    csgPreview_.op = CSGPreviewOp::Intersect;
+    rebuildCSGPreview();
+}
+
+void EditorApp::beginCSGPreviewXor() {
+    csgPreview_.active = true;
+    csgPreview_.op = CSGPreviewOp::Xor;
+    rebuildCSGPreview();
+}
+
+void EditorApp::cancelCSGPreview() {
+    csgPreview_.active = false;
+    csgPreview_.valid = false;
+    csgPreview_.op = CSGPreviewOp::None;
+    csgPreview_.message.clear();
+    csgPreview_.meshes.clear();
+}
+
+void EditorApp::rebuildCSGPreview() {
+    auto opLabel = [&](CSGPreviewOp op) -> const char* {
+        switch (op) {
+        case CSGPreviewOp::Subtract: return "subtract";
+        case CSGPreviewOp::Union: return "union";
+        case CSGPreviewOp::Intersect: return "intersect";
+        case CSGPreviewOp::Xor: return "xor";
+        default: return "none";
+        }
+    };
+
+    csgPreview_.meshes.clear();
+    csgPreview_.valid = false;
+    csgPreview_.message.clear();
+
+    auto makePreviewMesh = [&](const scene::BrushEntity& be) {
+        if (be.brushes.empty()) return;
+        EntityGPUData d;
+        d.model = glm::mat4(be.transform.matrix());
+        d.mesh = gfx::GPUEntityMesh::upload(build::buildEntityMesh(be, false));
+        if (!d.mesh.empty()) csgPreview_.meshes.push_back(std::move(d));
+    };
+
+    if (!csgPreview_.active || csgPreview_.op == CSGPreviewOp::None) return;
+
+    if (csgPreview_.op == CSGPreviewOp::Subtract) {
+        if (selection_.empty()) {
+            csgPreview_.message = "Select a brush entity as cutter.";
+            return;
+        }
+        auto* cutterEnt = scene_.getEntity(selection_.primary());
+        auto* cutterBE = cutterEnt ? std::get_if<scene::BrushEntity>(cutterEnt) : nullptr;
+        if (!cutterBE) {
+            csgPreview_.message = "CSG Subtract requires a brush entity cutter.";
+            return;
+        }
+
+        std::size_t affected = 0;
+        for (const auto& [id, entity] : scene_.entities) {
+            if (id == selection_.primary()) continue;
+            const auto* be = std::get_if<scene::BrushEntity>(&entity);
+            if (!be || !be->solid) continue;
+            if (!be->worldBounds().overlaps(cutterBE->worldBounds())) continue;
+
+            std::vector<geo::Brush> fragments;
+            for (const auto& subjectBrush : be->brushes) {
+                auto result = geo::csgSubtract(subjectBrush, std::span<const geo::Brush>(cutterBE->brushes));
+                for (auto& f : result) fragments.push_back(std::move(f));
+            }
+            if (fragments.empty()) continue;
+
+            scene::BrushEntity previewBE = *be;
+            previewBE.brushes = std::move(fragments);
+            for (auto& b : previewBE.brushes) b.invalidate();
+            makePreviewMesh(previewBE);
+            ++affected;
+        }
+
+        csgPreview_.valid = !csgPreview_.meshes.empty();
+        csgPreview_.message = csgPreview_.valid
+            ? std::format("Preview: {} affected entity(ies), {} preview mesh(es)", affected, csgPreview_.meshes.size())
+            : "No overlapping solid brushes for subtract.";
+        return;
+    }
+
+    if (selection_.ids.size() != 2) {
+        csgPreview_.message = "Select exactly 2 brush entities.";
+        return;
+    }
+
+    auto* aEnt = scene_.getEntity(selection_.ids[0]);
+    auto* bEnt = scene_.getEntity(selection_.ids[1]);
+    auto* aBE = aEnt ? std::get_if<scene::BrushEntity>(aEnt) : nullptr;
+    auto* bBE = bEnt ? std::get_if<scene::BrushEntity>(bEnt) : nullptr;
+    if (!aBE || !bBE) {
+        csgPreview_.message = "CSG preview requires two brush entities.";
+        return;
+    }
+
+    std::vector<geo::Brush> result;
+    for (const auto& aBrush : aBE->brushes) {
+        for (const auto& bBrush : bBE->brushes) {
+            std::vector<geo::Brush> fragments;
+            switch (csgPreview_.op) {
+            case CSGPreviewOp::Union:
+                fragments = geo::csgUnion(aBrush, bBrush);
+                break;
+            case CSGPreviewOp::Intersect:
+                fragments = geo::csgIntersect(aBrush, bBrush);
+                break;
+            case CSGPreviewOp::Xor:
+                fragments = geo::csgXor(aBrush, bBrush);
+                break;
+            default:
+                break;
+            }
+            for (auto& f : fragments) result.push_back(std::move(f));
+        }
+    }
+
+    if (result.empty()) {
+        csgPreview_.message = "Preview generated no resulting brushes.";
+        return;
+    }
+
+    scene::BrushEntity previewBE;
+    previewBE.name = std::format("preview_{}", opLabel(csgPreview_.op));
+    previewBE.transform = aBE->transform;
+    previewBE.brushes = std::move(result);
+    for (auto& b : previewBE.brushes) b.invalidate();
+    makePreviewMesh(previewBE);
+
+    csgPreview_.valid = !csgPreview_.meshes.empty();
+    csgPreview_.message = csgPreview_.valid
+        ? std::format("Preview: {} result brush(es)", previewBE.brushes.size())
+        : "Preview mesh build failed.";
+}
+
+void EditorApp::drawCSGPreviewOverlay() {
+    auto opLabel = [&](CSGPreviewOp op) -> const char* {
+        switch (op) {
+        case CSGPreviewOp::Subtract: return "Subtract";
+        case CSGPreviewOp::Union: return "Union";
+        case CSGPreviewOp::Intersect: return "Intersect";
+        case CSGPreviewOp::Xor: return "XOR";
+        default: return "None";
+        }
+    };
+
+    rebuildCSGPreview();
+
+    ImGui::SetNextWindowSize({460.f, 0.f}, ImGuiCond_Always);
+    ImGui::SetNextWindowPos({18.f, 70.f}, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    ImGui::Begin("CSG Preview", nullptr,
+        ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize);
+
+    ImGui::Text("Mode: %s", opLabel(csgPreview_.op));
+    if (!csgPreview_.message.empty()) ImGui::TextDisabled("%s", csgPreview_.message.c_str());
+    ImGui::TextDisabled("Preview meshes: %zu", csgPreview_.meshes.size());
+    ImGui::Separator();
+
+    ImGui::BeginDisabled(!csgPreview_.valid);
+    if (ImGui::Button("Apply", {180.f, 0.f})) applyCSGPreview();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", {180.f, 0.f})) cancelCSGPreview();
+    ImGui::TextDisabled("Result is rendered in cyan overlay until Apply.");
+
+    ImGui::End();
+}
+
+void EditorApp::applyCSGPreview() {
+    if (!csgPreview_.active || !csgPreview_.valid) return;
+    switch (csgPreview_.op) {
+    case CSGPreviewOp::Subtract:
+        applyCSGSubtract();
+        break;
+    case CSGPreviewOp::Union:
+        applyCSGUnion();
+        break;
+    case CSGPreviewOp::Intersect:
+        applyCSGIntersect();
+        break;
+    case CSGPreviewOp::Xor:
+        applyCSGXor();
+        break;
+    default:
+        break;
+    }
+    cancelCSGPreview();
+}
 
 void EditorApp::applyCSGSubtract() {
     if (!!selection_.empty()) return;
@@ -3451,6 +3670,7 @@ static void renderToFbo(
     const std::unordered_map<scene::EntityId, std::string>& entityGroups,
     const std::unordered_map<std::string, bool>& layerVisibility,
     const std::unordered_map<std::string, glm::vec3>& layerTint,
+    const std::vector<EditorApp::EntityGPUData>& previewMeshes,
     const std::string& soloLayer,
     const std::string& groupFilter,
     const scene::EntityId selectedId,
@@ -3509,6 +3729,17 @@ static void renderToFbo(
             });
         }
     }
+
+    for (const auto& pd : previewMeshes) {
+        for (const auto& sub : pd.mesh.submeshes) {
+            renderer.submit({
+                .mesh = &sub,
+                .modelMatrix = pd.model,
+                .material = makeEditorMaterial(materialLibrary, sub.materialId(), {0.15f, 0.95f, 0.95f}),
+            });
+        }
+    }
+
     renderer.endFrame();
 
     if (showGrid && grid.valid() && !isOrtho) {
@@ -3737,7 +3968,7 @@ void EditorApp::drawQuadViewport() {
 
         renderToFbo(quadFbos_[pane], cellSz, renderer_, gridRenderer_,
                     skyboxRenderer_, materialLibrary_, gpuData_,
-                    entityLayers_, entityGroups_, layerVisibility_, layerTint_,
+                    entityLayers_, entityGroups_, layerVisibility_, layerTint_, csgPreview_.meshes,
                     soloLayer_, groupFilter_,
                     selection_.primary(), view, proj, eye,
                     wireframe_, showGrid_, showSkybox_, (pane != 0), base);

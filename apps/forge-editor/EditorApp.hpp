@@ -93,6 +93,14 @@ private:
     void applyCSGUnion();
     void applyCSGIntersect();
     void applyCSGXor();
+    void beginCSGPreviewSubtract();
+    void beginCSGPreviewUnion();
+    void beginCSGPreviewIntersect();
+    void beginCSGPreviewXor();
+    void applyCSGPreview();
+    void cancelCSGPreview();
+    void rebuildCSGPreview();
+    void drawCSGPreviewOverlay();
     void applyHollow();
     void exportOBJ();
     void exportMAP();
@@ -252,6 +260,15 @@ private:
     } marquee_;
 
     std::optional<FaceSelection> bridgeSourceFace_;
+
+    enum class CSGPreviewOp { None, Subtract, Union, Intersect, Xor };
+    struct CSGPreviewState {
+        bool                     active = false;
+        bool                     valid = false;
+        CSGPreviewOp             op = CSGPreviewOp::None;
+        std::string              message;
+        std::vector<EntityGPUData> meshes;
+    } csgPreview_;
 
     std::unordered_map<scene::EntityId, std::string> entityLayers_;
     std::unordered_map<scene::EntityId, std::string> entityGroups_;
