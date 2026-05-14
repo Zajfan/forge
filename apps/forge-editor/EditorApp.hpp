@@ -262,11 +262,22 @@ private:
     std::optional<FaceSelection> bridgeSourceFace_;
 
     enum class CSGPreviewOp { None, Subtract, Union, Intersect, Xor };
+    struct CSGPreviewEntityInfo {
+        scene::EntityId          entityId = scene::kInvalidEntityId;
+        std::string              label;
+        std::size_t              sourceBrushCount = 0;
+        std::size_t              resultBrushCount = 0;
+        bool                     participates = false;
+        std::vector<std::string> warnings;
+    };
     struct CSGPreviewState {
         bool                     active = false;
         bool                     valid = false;
         CSGPreviewOp             op = CSGPreviewOp::None;
         std::string              message;
+        std::size_t              affectedEntities = 0;
+        std::size_t              resultBrushCount = 0;
+        std::vector<CSGPreviewEntityInfo> entities;
         std::vector<EntityGPUData> meshes;
     } csgPreview_;
 

@@ -2888,6 +2888,9 @@ void EditorApp::rebuildCSGPreview() {
     csgPreview_.meshes.clear();
     csgPreview_.valid = false;
     csgPreview_.message.clear();
+    csgPreview_.affectedEntities = 0;
+    csgPreview_.resultBrushCount = 0;
+    csgPreview_.entities.clear();
 
     auto makePreviewMesh = [&](const scene::BrushEntity& be) {
         if (be.brushes.empty()) return;
@@ -2895,6 +2898,18 @@ void EditorApp::rebuildCSGPreview() {
         d.model = glm::mat4(be.transform.matrix());
         d.mesh = gfx::GPUEntityMesh::upload(build::buildEntityMesh(be, false));
         if (!d.mesh.empty()) csgPreview_.meshes.push_back(std::move(d));
+    };
+
+    auto makeLabel = [&](scene::EntityId id, const scene::Entity& entity) {
+        return std::format("#{} {}", static_cast<unsigned long long>(id), scene::entityName(entity));
+    };
+
+    auto pushEntityInfo = [&](scene::EntityId id, const scene::Entity& entity) -> CSGPreviewEntityInfo& {
+        CSGPreviewEntityInfo info;
+        info.entityId = id;
+        info.label = makeLabel(id, entity);
+        csgPreview_.entities.push_back(std::move(info));
+        return csgPreview_.entities.back();
     };
 
     if (!csgPreview_.active || csgPreview_.op == CSGPreviewOp::None) return;
@@ -2911,27 +2926,52 @@ void EditorApp::rebuildCSGPreview() {
             return;
         }
 
+        auto& cutterInfo = pushEntityInfo(selection_.primary(), *cutterEnt);
+        cutterInfo.sourceBrushCount = cutterBE->brushes.size();
+        cutterInfo.participates = true;
+        cutterInfo.warnings.push_back("Selected as cutter");
+
         std::size_t affected = 0;
         for (const auto& [id, entity] : scene_.entities) {
             if (id == selection_.primary()) continue;
             const auto* be = std::get_if<scene::BrushEntity>(&entity);
-            if (!be || !be->solid) continue;
-            if (!be->worldBounds().overlaps(cutterBE->worldBounds())) continue;
+            if (!be) continue;
+
+            auto& info = pushEntityInfo(id, entity);
+            info.sourceBrushCount = be->brushes.size();
+
+            if (!be->solid) {
+                info.warnings.push_back("Skipped: entity is not solid");
+                continue;
+            }
+
+            const bool overlaps = be->worldBounds().overlaps(cutterBE->worldBounds());
+            if (!overlaps) {
+                info.warnings.push_back("No overlap with cutter");
+                continue;
+            }
 
             std::vector<geo::Brush> fragments;
             for (const auto& subjectBrush : be->brushes) {
                 auto result = geo::csgSubtract(subjectBrush, std::span<const geo::Brush>(cutterBE->brushes));
                 for (auto& f : result) fragments.push_back(std::move(f));
             }
-            if (fragments.empty()) continue;
+            info.participates = true;
+            info.resultBrushCount = fragments.size();
+            if (fragments.empty()) {
+                info.warnings.push_back("Would be fully consumed by subtract");
+                continue;
+            }
 
             scene::BrushEntity previewBE = *be;
             previewBE.brushes = std::move(fragments);
             for (auto& b : previewBE.brushes) b.invalidate();
             makePreviewMesh(previewBE);
             ++affected;
+            csgPreview_.resultBrushCount += previewBE.brushes.size();
         }
 
+        csgPreview_.affectedEntities = affected;
         csgPreview_.valid = !csgPreview_.meshes.empty();
         csgPreview_.message = csgPreview_.valid
             ? std::format("Preview: {} affected entity(ies), {} preview mesh(es)", affected, csgPreview_.meshes.size())
@@ -2951,6 +2991,16 @@ void EditorApp::rebuildCSGPreview() {
     if (!aBE || !bBE) {
         csgPreview_.message = "CSG preview requires two brush entities.";
         return;
+    }
+
+    auto& aInfo = pushEntityInfo(selection_.ids[0], *aEnt);
+    auto& bInfo = pushEntityInfo(selection_.ids[1], *bEnt);
+    aInfo.sourceBrushCount = aBE->brushes.size();
+    bInfo.sourceBrushCount = bBE->brushes.size();
+
+    if (!aBE->worldBounds().overlaps(bBE->worldBounds())) {
+        aInfo.warnings.push_back("No overlap with other selection");
+        bInfo.warnings.push_back("No overlap with other selection");
     }
 
     std::vector<geo::Brush> result;
@@ -2974,7 +3024,15 @@ void EditorApp::rebuildCSGPreview() {
         }
     }
 
+    aInfo.participates = true;
+    bInfo.participates = true;
+    aInfo.resultBrushCount = result.size();
+    bInfo.resultBrushCount = result.size();
+    csgPreview_.resultBrushCount = result.size();
+
     if (result.empty()) {
+        aInfo.warnings.push_back("Preview produced no result brushes");
+        bInfo.warnings.push_back("Preview produced no result brushes");
         csgPreview_.message = "Preview generated no resulting brushes.";
         return;
     }
@@ -2985,6 +3043,8 @@ void EditorApp::rebuildCSGPreview() {
     previewBE.brushes = std::move(result);
     for (auto& b : previewBE.brushes) b.invalidate();
     makePreviewMesh(previewBE);
+
+    csgPreview_.affectedEntities = 2;
 
     csgPreview_.valid = !csgPreview_.meshes.empty();
     csgPreview_.message = csgPreview_.valid
@@ -3013,8 +3073,32 @@ void EditorApp::drawCSGPreviewOverlay() {
 
     ImGui::Text("Mode: %s", opLabel(csgPreview_.op));
     if (!csgPreview_.message.empty()) ImGui::TextDisabled("%s", csgPreview_.message.c_str());
+    ImGui::Text("Affected entities: %zu", csgPreview_.affectedEntities);
+    ImGui::Text("Result brushes: %zu", csgPreview_.resultBrushCount);
     ImGui::TextDisabled("Preview meshes: %zu", csgPreview_.meshes.size());
     ImGui::Separator();
+
+    if (csgPreview_.entities.empty()) {
+        ImGui::TextDisabled("No entity diagnostics available.");
+    } else {
+        for (const auto& info : csgPreview_.entities) {
+            ImGui::PushID(static_cast<int>(info.entityId));
+            const ImVec4 titleCol = info.participates ? ImVec4{0.55f, 0.90f, 1.0f, 1.f}
+                                                     : ImVec4{0.75f, 0.75f, 0.75f, 1.f};
+            ImGui::TextColored(titleCol, "%s", info.label.c_str());
+            ImGui::Indent();
+            ImGui::Text("brushes: %zu  result brushes: %zu", info.sourceBrushCount, info.resultBrushCount);
+            if (info.warnings.empty()) {
+                ImGui::TextDisabled("No warnings");
+            } else {
+                for (const auto& warn : info.warnings)
+                    ImGui::TextColored({1.f, 0.72f, 0.25f, 1.f}, "%s", warn.c_str());
+            }
+            ImGui::Unindent();
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+    }
 
     ImGui::BeginDisabled(!csgPreview_.valid);
     if (ImGui::Button("Apply", {180.f, 0.f})) applyCSGPreview();
