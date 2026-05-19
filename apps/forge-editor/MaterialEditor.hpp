@@ -1,8 +1,13 @@
 #pragma once
 
 #include <forge/gfx/Material.hpp>
+#include <forge/gfx/TextureCache.hpp>
+#include <forge/scene/Scene.hpp>
+#include <array>
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace forge::editor {
 
@@ -13,6 +18,12 @@ public:
 
     void setMaterialLibrary(gfx::MaterialLibrary* lib) noexcept {
         library_ = lib;
+    }
+    void setScene(scene::Scene* scene) noexcept {
+        scene_ = scene;
+    }
+    void setTextureCache(gfx::TextureCache* cache) noexcept {
+        textureCache_ = cache;
     }
 
     void selectMaterial(const std::string& name) noexcept;
@@ -51,14 +62,36 @@ public:
     /// Import material from JSON file
     void importMaterial(const std::string& filepath) noexcept;
 
+    struct MaterialUsage {
+        std::size_t brushEntityCount = 0;
+        std::size_t faceCount = 0;
+    };
+
+    [[nodiscard]] MaterialUsage scanMaterialUsage(const std::string& materialName) const noexcept;
+    [[nodiscard]] std::size_t replaceMaterialReferences(const std::string& from, const std::string& to) noexcept;
+    void requestDeleteSelected() noexcept;
+    void deleteMaterialByName(const std::string& name) noexcept;
+
 private:
     gfx::MaterialLibrary* library_ = nullptr;
+    gfx::TextureCache* textureCache_ = nullptr;
+    scene::Scene* scene_ = nullptr;
     std::shared_ptr<gfx::Material> selected_ = nullptr;
+    std::string selectedName_;
+    std::string statusMessage_;
+    bool confirmDeleteOpen_ = false;
+    std::string pendingDeleteName_;
+    MaterialUsage pendingDeleteUsage_{};
+    bool replaceRefsOnDelete_ = true;
+    std::array<char, 256> replaceDeleteBuffer_{};
+    std::array<char, 256> deleteConfirmBuffer_{};
     bool showLibraryBrowser_ = true;
     bool showProperties_ = true;
     bool showTexturePreview_ = false;
     std::string newMaterialName_;
     int nextMaterialIndex_ = 0;
+    std::vector<std::string> textureAssetList_;
+    std::filesystem::path textureAssetRoot_;
 };
 
 } // namespace forge::editor

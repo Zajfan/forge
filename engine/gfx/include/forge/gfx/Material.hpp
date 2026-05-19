@@ -50,6 +50,8 @@ public:
     MaterialLibrary() = default;
 
     void addMaterial(const std::shared_ptr<Material>& material);
+    bool removeMaterial(const std::string& name);
+    bool renameMaterial(const std::string& oldName, const std::string& newName);
     std::shared_ptr<Material> getMaterial(const std::string& name);
     std::shared_ptr<Material> getOrCreateMaterial(const std::string& name);
 

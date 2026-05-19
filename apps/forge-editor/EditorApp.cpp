@@ -66,6 +66,36 @@ static void drawVertexSeparator() {
     ImGui::SameLine();
 }
 
+static void drawPaintHudLegend(ImVec2 pos, ImVec2 sz) {
+    (void)sz;
+    auto* dl = ImGui::GetWindowDrawList();
+    const char* lines[] = {
+        "LMB paint",
+        "MMB pick",
+        "RMB cancel",
+    };
+
+    float maxW = 0.f;
+    float totalH = 0.f;
+    for (const char* line : lines) {
+        const ImVec2 t = ImGui::CalcTextSize(line);
+        maxW = std::max(maxW, t.x);
+        totalH += t.y;
+    }
+    totalH += 4.f; // inner spacing between lines
+
+    const ImVec2 bgMin{pos.x + 10.f, pos.y + 10.f};
+    const ImVec2 bgMax{bgMin.x + maxW + 16.f, bgMin.y + totalH + 12.f};
+    dl->AddRectFilled(bgMin, bgMax, IM_COL32(16, 18, 22, 185), 4.f);
+    dl->AddRect(bgMin, bgMax, IM_COL32(120, 255, 160, 155), 4.f, 0, 1.0f);
+
+    float y = bgMin.y + 6.f;
+    for (const char* line : lines) {
+        dl->AddText({bgMin.x + 8.f, y}, IM_COL32(190, 245, 210, 235), line);
+        y += ImGui::CalcTextSize(line).y + 2.f;
+    }
+}
+
 static void drawVertexProperties_impl(
     EditorApp& app,
     scene::Scene& scene,
@@ -208,6 +238,62 @@ static ImVec2 w2s(glm::vec3 wp, const glm::mat4& vp,
              pos.y + (1.f - (n.y * .5f + .5f)) * sz.y };
 }
 
+static geo::AABB entityWorldBounds(const scene::Entity& entity) {
+    if (const auto* be = std::get_if<scene::BrushEntity>(&entity))
+        return be->worldBounds();
+    if (const auto* pe = std::get_if<scene::PointEntity>(&entity)) {
+        geo::AABB b;
+        b.expand(pe->transform.translation);
+        return b;
+    }
+    if (const auto* me = std::get_if<scene::MeshEntity>(&entity)) {
+        geo::AABB b;
+        b.expand(me->transform.translation);
+        return b;
+    }
+    return {};
+}
+
+static std::optional<float> raycastBrushFaces(
+    const scene::Scene& scene,
+    const glm::vec3& origin,
+    const glm::vec3& dir,
+    const std::unordered_set<scene::EntityId>& ignoreIds)
+{
+    float bestT = std::numeric_limits<float>::max();
+    bool hit = false;
+
+    for (const auto& [id, entity] : scene.entities) {
+        if (ignoreIds.contains(id)) continue;
+        const auto* be = std::get_if<scene::BrushEntity>(&entity);
+        if (!be || !be->visible) continue;
+
+        float broadT = 0.0f;
+        if (!rayVsAABB(origin, dir, be->worldBounds(), broadT)) continue;
+
+        for (std::size_t bi = 0; bi < be->brushes.size(); ++bi) {
+            const auto& brush = be->brushes[bi];
+            const auto& polys = brush.allFacePolygons();
+            for (const auto& poly : polys) {
+                if (poly.size() < 3) continue;
+                std::vector<glm::dvec3> worldPoly;
+                worldPoly.reserve(poly.size());
+                for (const auto& lp : poly)
+                    worldPoly.push_back(be->transform.transformPoint(lp));
+
+                float t = 0.0f;
+                if (rayPolygon(origin, dir, worldPoly, t) && t < bestT) {
+                    bestT = t;
+                    hit = true;
+                }
+            }
+        }
+    }
+
+    if (!hit) return std::nullopt;
+    return bestT;
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 bool EditorApp::init() {
@@ -272,6 +358,8 @@ bool EditorApp::init() {
     orthoCams_[1].dir = gfx::OrthoCamera::Dir::Front;
     orthoCams_[2].dir = gfx::OrthoCamera::Dir::Right;
     materialEditor_.setMaterialLibrary(&materialLibrary_);
+    materialEditor_.setScene(&scene_);
+    materialEditor_.setTextureCache(&textureCache_);
     prefabLibraryRoot_ = std::filesystem::current_path();
     std::snprintf(prefabRootBuffer_, sizeof(prefabRootBuffer_), "%s", prefabLibraryRoot_.string().c_str());
     refreshPrefabLibrary();
@@ -854,6 +942,7 @@ void EditorApp::drawFrame() {
     if (showValidation_)      drawValidationPanel();
     if (showBSPStats_)        drawBSPPanel();
     if (showPrefabBrowser_)   drawPrefabBrowser();
+    if (showPropertyInspector_) inspector_.draw(scene_, selection_, showPropertyInspector_, commands_);
     if (showScriptConsole_)   drawScriptConsole();
     if (showBloomSettings_)   drawBloomSettings();
     if (showAudioSettings_)   drawAudioSettings();
@@ -954,6 +1043,38 @@ void EditorApp::drawMainMenuBar() {
         if (ImGui::MenuItem("Duplicate Selected", "Ctrl+D", false, !selection_.empty()))
             duplicateSelection();
         ImGui::Separator();
+        // ── Align submenu ───────────────────────────────────────────────────
+        const bool canAlign = selection_.ids.size() >= 2;
+        if (ImGui::BeginMenu("Align to Primary", canAlign)) {
+            ImGui::TextDisabled("Align all selected to the primary entity's bounds");
+            ImGui::Separator();
+            if (ImGui::MenuItem("X — Align Left Edges"))    alignSelection(0, 0);
+            if (ImGui::MenuItem("X — Align Centers", "Ctrl+Shift+1"))       alignSelection(0, 1);
+            if (ImGui::MenuItem("X — Align Right Edges"))   alignSelection(0, 2);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Y — Align Bottom Edges"))  alignSelection(1, 0);
+            if (ImGui::MenuItem("Y — Align Centers", "Ctrl+Shift+2"))       alignSelection(1, 1);
+            if (ImGui::MenuItem("Y — Align Top Edges"))     alignSelection(1, 2);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Z — Align Front Edges"))   alignSelection(2, 0);
+            if (ImGui::MenuItem("Z — Align Centers", "Ctrl+Shift+3"))       alignSelection(2, 1);
+            if (ImGui::MenuItem("Z — Align Back Edges"))    alignSelection(2, 2);
+            ImGui::EndMenu();
+        }
+        const bool canGeomSnap = !selection_.empty();
+        if (ImGui::BeginMenu("Geometry Snap", canGeomSnap)) {
+            if (ImGui::MenuItem("Drop to Surface", "Ctrl+Shift+G"))
+                dropSelectionToSurface();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Snap to Geometry X", "Ctrl+Alt+1"))
+                snapSelectionToGeometryAxis(0);
+            if (ImGui::MenuItem("Snap to Geometry Y", "Ctrl+Alt+2"))
+                snapSelectionToGeometryAxis(1);
+            if (ImGui::MenuItem("Snap to Geometry Z", "Ctrl+Alt+3"))
+                snapSelectionToGeometryAxis(2);
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
         if (ImGui::MenuItem("Hide Selected", nullptr, false, !selection_.empty()))
             hideSelection();
         if (ImGui::MenuItem("Isolate Selected", nullptr, false, !selection_.empty()))
@@ -962,7 +1083,7 @@ void EditorApp::drawMainMenuBar() {
             !hiddenEntities_.empty() || !isolatedEntities_.empty()))
             clearHiddenIsolation();
         ImGui::Separator();
-        if (ImGui::MenuItem("Run Validation"))
+        if (ImGui::MenuItem("Run Validation", "F9"))
             runValidation();
         ImGui::Separator();
         if (ImGui::MenuItem("Snap All to Grid")) {
@@ -1007,6 +1128,7 @@ void EditorApp::drawMainMenuBar() {
         ImGui::Separator();
         ImGui::MenuItem("Material Editor", nullptr, &showMaterialEditor_);
         ImGui::MenuItem("Prefab Browser",  nullptr, &showPrefabBrowser_);
+        ImGui::MenuItem("Property Inspector", "Ctrl+Shift+I", &showPropertyInspector_);
         ImGui::MenuItem("Undo History",     nullptr, &showUndoHistory_);
         ImGui::MenuItem("Entity Classes",   nullptr, &showEntityClasses_);
         ImGui::MenuItem("Validation",       nullptr, &showValidation_);
@@ -1139,6 +1261,56 @@ void EditorApp::drawToolbar() {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle 1/4 viewport layout");
     ImGui::SameLine();
 
+    // Visibility quick actions
+    if (ImGui::Button("Visibility", {78.f, 22.f})) {
+        ImGui::OpenPopup("##visibility_menu");
+    }
+    if (ImGui::BeginPopup("##visibility_menu")) {
+        const bool hasSelection = !selection_.empty();
+        if (ImGui::MenuItem("Hide Selected", "Alt+H", false, hasSelection)) {
+            std::size_t changed = 0;
+            for (auto id : selection_.ids) {
+                if (!hiddenEntities_.contains(id)) {
+                    hiddenEntities_.insert(id);
+                    ++changed;
+                }
+            }
+            setStatus(std::format("Hidden {} entities", changed));
+        }
+        if (ImGui::MenuItem("Show Selected", nullptr, false, hasSelection)) {
+            std::size_t changed = 0;
+            for (auto id : selection_.ids) {
+                if (hiddenEntities_.erase(id) > 0) ++changed;
+            }
+            setStatus(std::format("Shown {} entities", changed));
+        }
+        if (ImGui::MenuItem("Toggle Selected", nullptr, false, hasSelection)) {
+            std::size_t hiddenCount = 0;
+            std::size_t shownCount = 0;
+            for (auto id : selection_.ids) {
+                if (hiddenEntities_.contains(id)) {
+                    hiddenEntities_.erase(id);
+                    ++shownCount;
+                } else {
+                    hiddenEntities_.insert(id);
+                    ++hiddenCount;
+                }
+            }
+            setStatus(std::format("Visibility toggled ({} hidden, {} shown)", hiddenCount, shownCount));
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Show All", "Alt+Shift+H", false, !hiddenEntities_.empty())) {
+            const std::size_t count = hiddenEntities_.size();
+            hiddenEntities_.clear();
+            setStatus(std::format("Showing all entities ({})", count));
+        }
+        ImGui::EndPopup();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Visibility actions for selected entities");
+    }
+    ImGui::SameLine();
+
     // Grid snap controls
     drawVertexSeparator();
     ImGui::Checkbox("Snap", &snapEnabled_); ImGui::SameLine();
@@ -1152,12 +1324,36 @@ void EditorApp::drawToolbar() {
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Grid size");
     ImGui::SameLine();
+
+    auto compactActionLabel = [](const std::string& label) {
+        constexpr std::size_t kMaxLen = 20;
+        if (label.size() <= kMaxLen) return label;
+        return label.substr(0, kMaxLen - 1) + "~";
+    };
+    const std::string undoLabel = commands_.lastUndoLabel();
+    const std::string redoLabel = commands_.lastRedoLabel();
+    const std::string undoBtn = undoLabel.empty()
+        ? std::string{"Undo"}
+        : std::format("Undo {}", compactActionLabel(undoLabel));
+    const std::string redoBtn = redoLabel.empty()
+        ? std::string{"Redo"}
+        : std::format("Redo {}", compactActionLabel(redoLabel));
+
     ImGui::BeginDisabled(!commands_.canUndo());
-    if (ImGui::Button("Undo")) { commands_.undo(scene_); rebuildAllMeshes(); }
+    if (ImGui::Button(undoBtn.c_str())) { commands_.undo(scene_); rebuildAllMeshes(); }
+    const bool undoHovered = ImGui::IsItemHovered();
     ImGui::EndDisabled(); ImGui::SameLine();
     ImGui::BeginDisabled(!commands_.canRedo());
-    if (ImGui::Button("Redo")) { commands_.redo(scene_); rebuildAllMeshes(); }
+    if (ImGui::Button(redoBtn.c_str())) { commands_.redo(scene_); rebuildAllMeshes(); }
+    const bool redoHovered = ImGui::IsItemHovered();
     ImGui::EndDisabled();
+
+    if (undoHovered && !undoLabel.empty()) {
+        ImGui::SetTooltip("Next undo: %s", undoLabel.c_str());
+    }
+    if (redoHovered && !redoLabel.empty()) {
+        ImGui::SetTooltip("Next redo: %s", redoLabel.c_str());
+    }
 
     // Play / Stop
     ImGui::SameLine();
@@ -1177,6 +1373,7 @@ void EditorApp::drawToolbar() {
     if (!ImGui::GetIO().WantCaptureKeyboard) {
         const bool ctrl = ImGui::GetIO().KeyCtrl;
         const bool shift = ImGui::GetIO().KeyShift;
+        const bool alt = ImGui::GetIO().KeyAlt;
         if (k.f1) wireframe_ = !wireframe_;
         if (k.q)  activeTool_ = ActiveTool::Select;
         if (k.w)  activeTool_ = ActiveTool::Move;
@@ -1222,9 +1419,57 @@ void EditorApp::drawToolbar() {
         if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y)) {
             commands_.redo(scene_); rebuildAllMeshes(); reconcileEditorState();
         }
+        // Ctrl+Shift+Z — redo (secondary to Ctrl+Y, uses UndoStack)
+        if (ctrl && shift && ImGui::IsKeyPressed(ImGuiKey_Z)) {
+            const std::string frameName = undoStack_.redo();
+            if (!frameName.empty()) {
+                setStatus(std::format("Redo: {}", frameName));
+            }
+        }
+        // Alt+H — hide selected entities
+        if (alt && ImGui::IsKeyPressed(ImGuiKey_H) && !shift && !selection_.empty()) {
+            for (auto id : selection_.ids) hiddenEntities_.insert(id);
+            setStatus(std::format("Hidden {} entities", selection_.ids.size()));
+        }
+        // Alt+Shift+H — show all hidden entities
+        if (alt && shift && ImGui::IsKeyPressed(ImGuiKey_H)) {
+            hiddenEntities_.clear();
+            setStatus("Showing all entities");
+        }
         // Ctrl+D — duplicate
         if (ctrl && ImGui::IsKeyPressed(ImGuiKey_D) && !selection_.empty())
             duplicateSelection();
+        // Ctrl+Shift+I — toggle Property Inspector panel
+        if (ctrl && shift && ImGui::IsKeyPressed(ImGuiKey_I)) {
+            showPropertyInspector_ = !showPropertyInspector_;
+            setStatus(std::format("Property Inspector {}", showPropertyInspector_ ? "shown" : "hidden"));
+        }
+        // Ctrl+Shift+1/2/3 — align selected centers to primary on X/Y/Z
+        if (ctrl && shift && selection_.ids.size() >= 2) {
+            if (ImGui::IsKeyPressed(ImGuiKey_1)) alignSelection(0, 1);
+            if (ImGui::IsKeyPressed(ImGuiKey_2)) alignSelection(1, 1);
+            if (ImGui::IsKeyPressed(ImGuiKey_3)) alignSelection(2, 1);
+        }
+        // Ctrl+Shift+G — drop selected entities to first supporting surface below.
+        if (ctrl && shift && ImGui::IsKeyPressed(ImGuiKey_G) && !selection_.empty()) {
+            dropSelectionToSurface();
+        }
+        // Ctrl+Alt+1/2/3 — snap selection to nearest geometry along X/Y/Z.
+        if (ctrl && alt && ImGui::IsKeyPressed(ImGuiKey_O)) {
+            orthoEditMode_ = !orthoEditMode_;
+            setStatus(std::format("Orthographic edit mode {}", orthoEditMode_ ? "enabled" : "disabled"));
+        }
+        if (ctrl && alt && ImGui::IsKeyPressed(ImGuiKey_Q)) {
+            viewportLayout_ = (viewportLayout_ == ViewportLayout::Single)
+                ? ViewportLayout::Quad
+                : ViewportLayout::Single;
+            setStatus(std::format("Viewport layout: {}", viewportLayout_ == ViewportLayout::Single ? "single" : "quad"));
+        }
+        if (ctrl && alt && !selection_.empty()) {
+            if (ImGui::IsKeyPressed(ImGuiKey_1)) snapSelectionToGeometryAxis(0);
+            if (ImGui::IsKeyPressed(ImGuiKey_2)) snapSelectionToGeometryAxis(1);
+            if (ImGui::IsKeyPressed(ImGuiKey_3)) snapSelectionToGeometryAxis(2);
+        }
         // Arrow keys — nudge selection in world space (TrenchBroom-style keyboard move)
         if (!selection_.empty()) {
             const double step = static_cast<double>(gridSize_) * (shift ? 10.0 : 1.0);
@@ -1245,6 +1490,10 @@ void EditorApp::drawToolbar() {
             if (auto* e = scene_.getEntity(renamingId_))
                 std::snprintf(treeRenameBuffer_, sizeof(treeRenameBuffer_),
                               "%s", scene::entityName(*e).c_str());
+        }
+        // F9 — run level validation and open validation panel
+        if (ImGui::IsKeyPressed(ImGuiKey_F9)) {
+            runValidation();
         }
         // Delete — batch-delete all selected entities
         if (ImGui::IsKeyPressed(ImGuiKey_Delete) && !selection_.empty()) {
@@ -1486,6 +1735,13 @@ void EditorApp::drawViewport() {
     const glm::mat4 vp = frame.proj * frame.view;
     if (faceSelection_.valid())
         drawFaceOverlay(vpPos, sz, vp);
+    if (activeTool_ == ActiveTool::Paint) {
+        if (paintDrag_.dragging)
+            drawPaintDragOverlay(vpPos, sz, vp);
+        else if (paintHoverFace_.has_value())
+            drawPaintHoverOverlay(vpPos, sz, vp);
+        drawPaintHudLegend(vpPos, sz);
+    }
     if (vertexSelection_.valid())
         drawVertexOverlay(vpPos, sz, vp);
     if (activeTool_ == ActiveTool::Clip && !selection_.empty())
@@ -1561,6 +1817,163 @@ void EditorApp::drawFaceOverlay(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
                     brush.faces[faceSelection_.faceIdx].materialId.c_str());
 }
 
+void EditorApp::drawPaintHoverOverlay(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
+    if (!paintHoverFace_.has_value()) return;
+
+    const auto& hover = *paintHoverFace_;
+    auto* entity = scene_.getEntity(hover.entityId);
+    if (!entity) return;
+    auto* be = std::get_if<scene::BrushEntity>(entity);
+    if (!be || hover.brushIdx >= be->brushes.size()) return;
+
+    const auto& brush = be->brushes[hover.brushIdx];
+    if (hover.faceIdx >= brush.faces.size()) return;
+
+    const auto& poly = brush.facePolygon(hover.faceIdx);
+    if (poly.size() < 3) return;
+
+    auto* dl = ImGui::GetWindowDrawList();
+    std::vector<ImVec2> pts;
+    pts.reserve(poly.size());
+    for (const auto& lp : poly) {
+        const glm::vec3 wp = glm::vec3(be->transform.transformPoint(lp));
+        pts.push_back(w2s(wp, vp, pos, sz));
+    }
+
+    dl->AddConvexPolyFilled(pts.data(), (int)pts.size(), IM_COL32(80,220,120,35));
+    for (std::size_t i = 0; i < pts.size(); ++i)
+        dl->AddLine(pts[i], pts[(i + 1) % pts.size()], IM_COL32(120,255,160,240), 2.f);
+
+    const glm::vec3 centre = [&] {
+        glm::dvec3 c{};
+        for (const auto& lp : poly) c += lp;
+        return glm::vec3(be->transform.transformPoint(c / double(poly.size())));
+    }();
+
+    const glm::vec3 tip = centre
+        + glm::vec3(be->transform.transformNormal(brush.faces[hover.faceIdx].plane.normal)) * 24.f;
+
+    dl->AddLine(w2s(centre, vp, pos, sz), w2s(tip, vp, pos, sz), IM_COL32(120,255,160,220), 1.5f);
+
+    const auto labelPos = w2s(tip, vp, pos, sz);
+    if (labelPos.x > -1e5f) {
+        const std::string previewLabel = std::format("paint → {}", paintMaterial_);
+        dl->AddText(labelPos, IM_COL32(120,255,160,240), previewLabel.c_str());
+    }
+}
+
+void EditorApp::drawPaintDragOverlay(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
+    if (!paintDrag_.dragging || paintDrag_.paintedFaces.empty()) return;
+
+    auto* dl = ImGui::GetWindowDrawList();
+    std::size_t drawnFaces = 0;
+
+    for (const auto& sel : paintDrag_.paintedFaces) {
+        auto* entity = scene_.getEntity(sel.entityId);
+        if (!entity) continue;
+        auto* be = std::get_if<scene::BrushEntity>(entity);
+        if (!be || sel.brushIdx >= be->brushes.size()) continue;
+
+        const auto& brush = be->brushes[sel.brushIdx];
+        if (sel.faceIdx >= brush.faces.size()) continue;
+
+        const auto& poly = brush.facePolygon(sel.faceIdx);
+        if (poly.size() < 3) continue;
+
+        std::vector<ImVec2> pts;
+        pts.reserve(poly.size());
+        for (const auto& lp : poly) {
+            const glm::vec3 wp = glm::vec3(be->transform.transformPoint(lp));
+            pts.push_back(w2s(wp, vp, pos, sz));
+        }
+
+        dl->AddConvexPolyFilled(pts.data(), (int)pts.size(), IM_COL32(255, 195, 80, 40));
+        for (std::size_t i = 0; i < pts.size(); ++i)
+            dl->AddLine(pts[i], pts[(i + 1) % pts.size()], IM_COL32(255, 210, 110, 240), 2.f);
+        ++drawnFaces;
+    }
+
+    if (drawnFaces == 0) return;
+    const bool queueFull = paintDrag_.paintedFaces.size() >= paintDragQueueCap_;
+
+    const std::string label = std::format(
+        "queue: {} face{} -> {}",
+        drawnFaces,
+        drawnFaces == 1 ? "" : "s",
+        paintMaterial_);
+    const std::string fullHint = "queue full";
+    const ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+    const ImVec2 hintSize = queueFull ? ImGui::CalcTextSize(fullHint.c_str()) : ImVec2{0.f, 0.f};
+    const ImVec2 mouse = ImGui::GetMousePos();
+    const ImVec2 bgMin{mouse.x + 14.f, mouse.y + 12.f};
+    const float contentWidth = std::max(textSize.x, hintSize.x);
+    const float contentHeight = textSize.y + (queueFull ? hintSize.y + 2.f : 0.f);
+    const ImVec2 bgMax{bgMin.x + contentWidth + 10.f, bgMin.y + contentHeight + 6.f};
+    dl->AddRectFilled(bgMin, bgMax, IM_COL32(18, 20, 24, 210), 4.f);
+    const ImU32 border = queueFull ? IM_COL32(255, 120, 90, 220) : IM_COL32(255, 210, 110, 220);
+    dl->AddRect(bgMin, bgMax, border, 4.f, 0, 1.2f);
+    dl->AddText({bgMin.x + 5.f, bgMin.y + 3.f}, IM_COL32(255, 220, 150, 245), label.c_str());
+    if (queueFull) {
+        dl->AddText({bgMin.x + 5.f, bgMin.y + 3.f + textSize.y + 2.f}, IM_COL32(255, 140, 110, 245), fullHint.c_str());
+    }
+}
+
+
+// ─── Box-create preview ──────────────────────────────────────────────────────
+
+void EditorApp::drawBoxCreatePreview(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
+    if (!boxCreate_.draggingFootprint && !boxCreate_.adjustingHeight) return;
+
+    const double minX = std::min(boxCreate_.start.x, boxCreate_.end.x);
+    const double maxX = std::max(boxCreate_.start.x, boxCreate_.end.x);
+    const double minZ = std::min(boxCreate_.start.z, boxCreate_.end.z);
+    const double maxZ = std::max(boxCreate_.start.z, boxCreate_.end.z);
+    const double baseY = boxCreate_.start.y;
+    const double topY = baseY + std::max(1.0, boxCreate_.height);
+
+    std::array<glm::vec3, 8> corners = {
+        glm::vec3((float)minX, (float)baseY, (float)minZ),
+        glm::vec3((float)maxX, (float)baseY, (float)minZ),
+        glm::vec3((float)maxX, (float)baseY, (float)maxZ),
+        glm::vec3((float)minX, (float)baseY, (float)maxZ),
+        glm::vec3((float)minX, (float)topY,  (float)minZ),
+        glm::vec3((float)maxX, (float)topY,  (float)minZ),
+        glm::vec3((float)maxX, (float)topY,  (float)maxZ),
+        glm::vec3((float)minX, (float)topY,  (float)maxZ),
+    };
+
+    std::array<ImVec2, 8> pts;
+    for (int i = 0; i < 8; ++i) pts[i] = w2s(corners[i], vp, pos, sz);
+
+    auto* dl = ImGui::GetWindowDrawList();
+    const ImU32 lineColor = IM_COL32(255, 220, 120, 230);
+
+    // Bottom/top loops.
+    for (int i = 0; i < 4; ++i) {
+        dl->AddLine(pts[i], pts[(i + 1) % 4], lineColor, 1.8f);
+        dl->AddLine(pts[i + 4], pts[((i + 1) % 4) + 4], lineColor, 1.8f);
+    }
+    // Vertical edges.
+    for (int i = 0; i < 4; ++i)
+        dl->AddLine(pts[i], pts[i + 4], lineColor, 1.6f);
+
+    const std::string dimText = std::format(
+        "{:.0f} x {:.0f} x {:.0f}",
+        maxX - minX,
+        topY - baseY,
+        maxZ - minZ);
+
+    const glm::vec3 topCenter = {
+        static_cast<float>((minX + maxX) * 0.5),
+        static_cast<float>(topY),
+        static_cast<float>((minZ + maxZ) * 0.5)
+    };
+    const ImVec2 labelPt = w2s(topCenter, vp, pos, sz);
+    dl->AddText({labelPt.x + 6.f, labelPt.y - 16.f},
+                IM_COL32(255, 255, 180, 240), dimText.c_str());
+}
+
+
 // ─── Clip preview ─────────────────────────────────────────────────────────────
 
 void EditorApp::drawClipPreview(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
@@ -1584,60 +1997,6 @@ void EditorApp::drawClipPreview(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
     dl->AddConvexPolyFilled(pts.data(), 4, IM_COL32(255,160,50,35));
     for (int i = 0; i < 4; ++i)
         dl->AddLine(pts[i], pts[(i+1)%4], IM_COL32(255,160,50,200), 1.5f);
-}
-
-void EditorApp::drawBoxCreatePreview(ImVec2 pos, ImVec2 sz, const glm::mat4& vp) {
-    if (!boxCreate_.draggingFootprint && !boxCreate_.adjustingHeight) return;
-
-    const double minX = std::min(boxCreate_.start.x, boxCreate_.end.x);
-    const double maxX = std::max(boxCreate_.start.x, boxCreate_.end.x);
-    const double minZ = std::min(boxCreate_.start.z, boxCreate_.end.z);
-    const double maxZ = std::max(boxCreate_.start.z, boxCreate_.end.z);
-    const double baseY = std::min(boxCreate_.start.y, boxCreate_.end.y);
-    const double height = std::max(
-        boxCreate_.height,
-        snapEnabled_ ? static_cast<double>(gridSize_) : 8.0);
-    const double topY = baseY + height;
-
-    const std::array<glm::vec3, 8> corners = {{
-        {static_cast<float>(minX), static_cast<float>(baseY), static_cast<float>(minZ)},
-        {static_cast<float>(maxX), static_cast<float>(baseY), static_cast<float>(minZ)},
-        {static_cast<float>(maxX), static_cast<float>(baseY), static_cast<float>(maxZ)},
-        {static_cast<float>(minX), static_cast<float>(baseY), static_cast<float>(maxZ)},
-        {static_cast<float>(minX), static_cast<float>(topY),  static_cast<float>(minZ)},
-        {static_cast<float>(maxX), static_cast<float>(topY),  static_cast<float>(minZ)},
-        {static_cast<float>(maxX), static_cast<float>(topY),  static_cast<float>(maxZ)},
-        {static_cast<float>(minX), static_cast<float>(topY),  static_cast<float>(maxZ)},
-    }};
-
-    std::array<ImVec2, 8> pts;
-    for (int i = 0; i < 8; ++i) pts[i] = w2s(corners[i], vp, pos, sz);
-
-    auto* dl = ImGui::GetWindowDrawList();
-    const ImU32 line = IM_COL32(80, 210, 255, 245);
-    const ImU32 fill = IM_COL32(80, 210, 255, 35);
-    dl->AddQuadFilled(pts[0], pts[1], pts[2], pts[3], fill);
-    dl->AddQuadFilled(pts[4], pts[5], pts[6], pts[7], fill);
-    dl->AddLine(pts[0], pts[1], line, 2.f); dl->AddLine(pts[1], pts[2], line, 2.f);
-    dl->AddLine(pts[2], pts[3], line, 2.f); dl->AddLine(pts[3], pts[0], line, 2.f);
-    dl->AddLine(pts[4], pts[5], line, 2.f); dl->AddLine(pts[5], pts[6], line, 2.f);
-    dl->AddLine(pts[6], pts[7], line, 2.f); dl->AddLine(pts[7], pts[4], line, 2.f);
-    dl->AddLine(pts[0], pts[4], line, 2.f); dl->AddLine(pts[1], pts[5], line, 2.f);
-    dl->AddLine(pts[2], pts[6], line, 2.f); dl->AddLine(pts[3], pts[7], line, 2.f);
-
-    // Dimension readout overlay
-    const float ww = static_cast<float>(maxX - minX);
-    const float dw = static_cast<float>(maxZ - minZ);
-    const float hw = static_cast<float>(height);
-    const std::string dimText = std::format("{:.0f} \xc3\x97 {:.0f} \xc3\x97 {:.0f}", ww, dw, hw);
-    const glm::vec3 topCenter{
-        static_cast<float>((minX + maxX) * 0.5),
-        static_cast<float>(topY),
-        static_cast<float>((minZ + maxZ) * 0.5)
-    };
-    const ImVec2 labelPt = w2s(topCenter, vp, pos, sz);
-    dl->AddText({labelPt.x + 6.f, labelPt.y - 16.f},
-                IM_COL32(255, 255, 180, 240), dimText.c_str());
 }
 
 void EditorApp::drawMarqueePreview(ImVec2 pos) {
@@ -1806,10 +2165,36 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
 
     // Paint tool drag-to-paint handling
     if (activeTool_ == ActiveTool::Paint) {
+        if (!paintDrag_.dragging && ImGui::IsMouseClicked(ImGuiMouseButton_Middle) && !gizmoOver) {
+            const ImVec2 rel = { ImGui::GetMousePos().x - vpPos.x,
+                                 ImGui::GetMousePos().y - vpPos.y };
+            const glm::vec2 ndc = {
+                 (rel.x / vpSz.x) * 2.f - 1.f,
+                -((rel.y / vpSz.y) * 2.f - 1.f)
+            };
+
+            if (const auto hit = pickFace(ndc, scene_, camera_, aspect)) {
+                if (entityVisibleInEditor(hit->entityId) && !entityLockedByLayer(hit->entityId)) {
+                    if (auto* e = scene_.getEntity(hit->entityId)) {
+                        if (auto* be = std::get_if<scene::BrushEntity>(e)) {
+                            if (hit->brushIdx < be->brushes.size() &&
+                                hit->faceIdx < be->brushes[hit->brushIdx].faces.size()) {
+                                const auto& pickedMat = be->brushes[hit->brushIdx].faces[hit->faceIdx].materialId;
+                                std::snprintf(paintMaterial_, sizeof(paintMaterial_), "%s", pickedMat.c_str());
+                                setStatus(std::format("Picked material '{}'", pickedMat));
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             paintDrag_.dragging = false;
             paintDrag_.paintedFaces.clear();
             paintDrag_.origMaterials.clear();
+            paintHoverFace_.reset();
             setStatus("Paint cancelled.");
             return;
         }
@@ -1831,7 +2216,7 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
                             return f.entityId == hit->entityId && f.brushIdx == hit->brushIdx && f.faceIdx == hit->faceIdx;
                         });
                     
-                    if (!already && paintDrag_.paintedFaces.size() < 100) {  // Limit to 100 faces per drag
+                    if (!already && paintDrag_.paintedFaces.size() < paintDragQueueCap_) {
                         FaceSelection sel;
                         sel.entityId = hit->entityId;
                         sel.brushIdx = hit->brushIdx;
@@ -1876,6 +2261,7 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
                 paintDrag_.dragging = false;
                 paintDrag_.paintedFaces.clear();
                 paintDrag_.origMaterials.clear();
+                paintHoverFace_.reset();
             }
             return;
         }
@@ -1914,9 +2300,33 @@ void EditorApp::handleViewportMouse(ImVec2 vpPos, ImVec2 vpSz) {
                     selection_.selectEntity(hit->entityId);
                 }
             }
+            paintHoverFace_.reset();
+        }
+
+        if (!paintDrag_.dragging && ImGui::IsItemHovered()) {
+            const ImVec2 rel = { ImGui::GetMousePos().x - vpPos.x,
+                                 ImGui::GetMousePos().y - vpPos.y };
+            const glm::vec2 ndc = {
+                 (rel.x / vpSz.x) * 2.f - 1.f,
+                -((rel.y / vpSz.y) * 2.f - 1.f)
+            };
+
+            if (const auto hover = pickFace(ndc, scene_, camera_, aspect)) {
+                if (entityVisibleInEditor(hover->entityId) && !entityLockedByLayer(hover->entityId)) {
+                    paintHoverFace_ = *hover;
+                } else {
+                    paintHoverFace_.reset();
+                }
+            } else {
+                paintHoverFace_.reset();
+            }
+        } else if (!ImGui::IsItemHovered()) {
+            paintHoverFace_.reset();
         }
         return;
     }
+
+    paintHoverFace_.reset();
 
     if (activeTool_ == ActiveTool::BoxCreate) {
         const double minSpan = snapEnabled_ ? static_cast<double>(gridSize_) : 16.0;
@@ -2382,6 +2792,65 @@ void EditorApp::drawProperties() {
         ImGui::Separator();
     }
 
+
+            // ── Align tools (multi-select only) ──────────────────────────────────────
+            if (selection_.ids.size() >= 2) {
+                ImGui::SeparatorText("Align to Primary");
+                ImGui::TextDisabled("Primary: entity #%llu",
+                    static_cast<unsigned long long>(selection_.primary()));
+
+                const float bw = (ImGui::GetContentRegionAvail().x - 8.f) / 3.f;
+                const ImVec2 bs{bw, 0.f};
+
+                // X axis row
+                ImGui::TextUnformatted("X"); ImGui::SameLine();
+                if (ImGui::Button("Left##xmin",   bs)) alignSelection(0, 0);
+                ImGui::SameLine();
+                if (ImGui::Button("CenX##xcen",   bs)) alignSelection(0, 1);
+                ImGui::SameLine();
+                if (ImGui::Button("Right##xmax",  bs)) alignSelection(0, 2);
+
+                // Y axis row
+                ImGui::TextUnformatted("Y"); ImGui::SameLine();
+                if (ImGui::Button("Bot##ymin",    bs)) alignSelection(1, 0);
+                ImGui::SameLine();
+                if (ImGui::Button("CenY##ycen",   bs)) alignSelection(1, 1);
+                ImGui::SameLine();
+                if (ImGui::Button("Top##ymax",    bs)) alignSelection(1, 2);
+
+                // Z axis row
+                ImGui::TextUnformatted("Z"); ImGui::SameLine();
+                if (ImGui::Button("Fwd##zmin",    bs)) alignSelection(2, 0);
+                ImGui::SameLine();
+                if (ImGui::Button("CenZ##zcen",   bs)) alignSelection(2, 1);
+                ImGui::SameLine();
+                if (ImGui::Button("Back##zmax",   bs)) alignSelection(2, 2);
+
+                ImGui::Separator();
+            }
+
+            if (activeTool_ == ActiveTool::Paint || paintDrag_.dragging) {
+        ImGui::SeparatorText("Paint");
+        ImGui::LabelText("Current Material", "%s", paintMaterial_);
+        ImGui::LabelText("Queued Faces", "%zu", paintDrag_.paintedFaces.size());
+        ImGui::LabelText("State", "%s", paintDrag_.dragging ? "Dragging" : "Idle");
+
+        int queueCap = static_cast<int>(paintDragQueueCap_);
+        ImGui::SetNextItemWidth(-1.f);
+        if (ImGui::DragInt("Queue Cap", &queueCap, 1.f, 1, 1024, "%d")) {
+            paintDragQueueCap_ = static_cast<std::size_t>(std::max(1, queueCap));
+        }
+
+        ImGui::BeginDisabled(!paintDrag_.dragging || paintDrag_.paintedFaces.empty());
+        if (ImGui::Button("Clear Queue", {-1.f, 0.f})) {
+            paintDrag_.paintedFaces.clear();
+            paintDrag_.origMaterials.clear();
+            setStatus("Paint queue cleared.");
+        }
+        ImGui::EndDisabled();
+        ImGui::Separator();
+    }
+
     // ── Vertex properties ────────────────────────────────────────────────────
     if (vertexSelection_.valid() && activeTool_ == ActiveTool::VertexSelect) {
         drawVertexProperties_impl(*this, scene_, vertexSelection_, commands_,
@@ -2479,10 +2948,28 @@ void EditorApp::drawProperties() {
     const scene::Transform& tf = scene::entityTransform(*entity);
     glm::vec3 pos = glm::vec3(tf.translation);
     ImGui::SetNextItemWidth(-1.f);
-    if (ImGui::DragFloat3("Position", glm::value_ptr(pos), 1.f)) {
+    static scene::EntityId positionDragEntity = scene::kInvalidEntityId;
+    static glm::dvec3 positionDragStart{0.0, 0.0, 0.0};
+    const bool posChanged = ImGui::DragFloat3("Position", glm::value_ptr(pos), 1.f);
+    if (ImGui::IsItemActivated()) {
+        positionDragEntity = selection_.primary();
+        positionDragStart = tf.translation;
+    }
+    if (posChanged) {
         std::visit([&](auto& e) { e.transform.translation = glm::dvec3(pos); }, *entity);
         if (auto it = gpuData_.find(selection_.primary()); it != gpuData_.end())
             it->second.model = glm::mat4(tf.matrix());
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit() && positionDragEntity != scene::kInvalidEntityId) {
+        auto* current = scene_.getEntity(positionDragEntity);
+        if (current) {
+            const glm::dvec3 endPos = scene::entityTransform(*current).translation;
+            const glm::dvec3 delta = endPos - positionDragStart;
+            if (glm::length(delta) > 1e-6) {
+                commands_.push(std::make_unique<MoveEntityCommand>(positionDragEntity, positionDragStart, endPos), scene_);
+            }
+        }
+        positionDragEntity = scene::kInvalidEntityId;
     }
 
     // Brush entity specifics
@@ -2496,17 +2983,46 @@ void EditorApp::drawProperties() {
             ImGui::LabelText("Extents", "%.0f × %.0f × %.0f", e.x, e.y, e.z);
         }
         bool solid = be->solid, vis = be->visible;
-        if (ImGui::Checkbox("Solid",   &solid))   const_cast<scene::BrushEntity*>(be)->solid   = solid;
+        if (ImGui::Checkbox("Solid", &solid) && solid != be->solid) {
+            commands_.push(
+                std::make_unique<SetBrushBoolCommand>(
+                    selection_.primary(),
+                    SetBrushBoolCommand::Field::Solid,
+                    be->solid,
+                    solid),
+                scene_);
+        }
         ImGui::SameLine();
-        if (ImGui::Checkbox("Visible", &vis))     const_cast<scene::BrushEntity*>(be)->visible = vis;
+        if (ImGui::Checkbox("Visible", &vis) && vis != be->visible) {
+            commands_.push(
+                std::make_unique<SetBrushBoolCommand>(
+                    selection_.primary(),
+                    SetBrushBoolCommand::Field::Visible,
+                    be->visible,
+                    vis),
+                scene_);
+        }
 
         auto* beMut = const_cast<scene::BrushEntity*>(be);
         char classBuf[128];
         std::snprintf(classBuf, sizeof(classBuf), "%s", be->classname.c_str());
         ImGui::SetNextItemWidth(-1.f);
         if (ImGui::InputText("Classname", classBuf, sizeof(classBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
-            beMut->classname = classBuf;
-            ensureClassDefaults(*beMut, globalRegistry().find(beMut->classname));
+            const std::string nextClassname = classBuf;
+            if (!nextClassname.empty() && nextClassname != beMut->classname) {
+                scene::BrushEntity preview = *beMut;
+                preview.classname = nextClassname;
+                ensureClassDefaults(preview, globalRegistry().find(nextClassname));
+
+                commands_.push(
+                    std::make_unique<SetBrushClassnameCommand>(
+                        selection_.primary(),
+                        beMut->classname,
+                        nextClassname,
+                        beMut->properties,
+                        preview.properties),
+                    scene_);
+            }
         }
 
         if (const auto* def = globalRegistry().find(beMut->classname)) {
@@ -2518,13 +3034,32 @@ void EditorApp::drawProperties() {
                 ImGui::SeparatorText("Properties");
                 ensureClassDefaults(*beMut, def);
                 for (auto& [k, v] : beMut->properties) {
-                    drawEntityPropertyEditor(def->findProp(k), k, v);
+                    scene::PropertyValue staged = v;
+                    if (drawEntityPropertyEditor(def->findProp(k), k, staged) && staged != v) {
+                        commands_.push(
+                            std::make_unique<SetEntityPropertyCommand>(
+                                selection_.primary(),
+                                k,
+                                std::optional<scene::PropertyValue>{v},
+                                staged),
+                            scene_);
+                    }
                 }
             }
         } else if (!beMut->properties.empty()) {
             ImGui::SeparatorText("Properties");
-            for (auto& [k, v] : beMut->properties)
-                drawEntityPropertyEditor(nullptr, k, v);
+            for (auto& [k, v] : beMut->properties) {
+                scene::PropertyValue staged = v;
+                if (drawEntityPropertyEditor(nullptr, k, staged) && staged != v) {
+                    commands_.push(
+                        std::make_unique<SetEntityPropertyCommand>(
+                            selection_.primary(),
+                            k,
+                            std::optional<scene::PropertyValue>{v},
+                            staged),
+                        scene_);
+                }
+            }
         }
 
         ImGui::SeparatorText("Operations");
@@ -2550,7 +3085,26 @@ void EditorApp::drawProperties() {
     if (const auto* pe = std::get_if<scene::PointEntity>(entity)) {
         ImGui::SeparatorText("Point Entity");
         auto* peMut = const_cast<scene::PointEntity*>(pe);
-        ImGui::LabelText("Class", "%s", peMut->classname.c_str());
+        char classBuf[128];
+        std::snprintf(classBuf, sizeof(classBuf), "%s", peMut->classname.c_str());
+        ImGui::SetNextItemWidth(-1.f);
+        if (ImGui::InputText("Classname", classBuf, sizeof(classBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+            const std::string nextClassname = classBuf;
+            if (!nextClassname.empty() && nextClassname != peMut->classname) {
+                scene::PointEntity preview = *peMut;
+                preview.classname = nextClassname;
+                ensureClassDefaults(preview, globalRegistry().find(nextClassname));
+
+                commands_.push(
+                    std::make_unique<SetPointClassnameCommand>(
+                        selection_.primary(),
+                        peMut->classname,
+                        nextClassname,
+                        peMut->properties,
+                        preview.properties),
+                    scene_);
+            }
+        }
         if (const auto* def = globalRegistry().find(peMut->classname)) {
             ImGui::TextDisabled("%s", def->description.c_str());
             if (ImGui::Button("Add Missing Class Defaults"))
@@ -2559,10 +3113,23 @@ void EditorApp::drawProperties() {
         }
         if (!peMut->properties.empty()) {
             ImGui::SeparatorText("Properties");
-            for (auto& [k, v] : peMut->properties)
-                drawEntityPropertyEditor(globalRegistry().find(peMut->classname)
-                    ? globalRegistry().find(peMut->classname)->findProp(k)
-                    : nullptr, k, v);
+            for (auto& [k, v] : peMut->properties) {
+                scene::PropertyValue staged = v;
+                if (drawEntityPropertyEditor(
+                    globalRegistry().find(peMut->classname)
+                        ? globalRegistry().find(peMut->classname)->findProp(k)
+                        : nullptr,
+                    k,
+                    staged) && staged != v) {
+                    commands_.push(
+                        std::make_unique<SetEntityPropertyCommand>(
+                            selection_.primary(),
+                            k,
+                            std::optional<scene::PropertyValue>{v},
+                            staged),
+                        scene_);
+                }
+            }
         }
     }
 
@@ -3273,6 +3840,17 @@ void EditorApp::drawStatusBar() {
     }
 
     ImGui::SameLine();
+    const auto recent = commands_.recentUndoLabels(3);
+    if (!recent.empty()) {
+        std::string recentText = "  recent: ";
+        for (std::size_t i = 0; i < recent.size(); ++i) {
+            if (i > 0) recentText += " | ";
+            recentText += recent[i];
+        }
+        ImGui::TextDisabled("%s", recentText.c_str());
+        ImGui::SameLine();
+    }
+
     const auto st = scene_.stats();
     const std::string r = std::format("  {:.0f} fps  |  {} DC  |  {} tri  |  {} brushes  |  grid: {}{}",
         window_.fps(), renderer_.drawCallCount(), renderer_.triangleCount(),
@@ -3672,9 +4250,22 @@ static void drawVertexProperties_impl(
 
 void EditorApp::saveScene() {
     if (currentFile_.empty()) { saveSceneAs(); return; }
-    const auto err = serial::saveScene(scene_, currentFile_);
-    if (err.empty())
+    serial::EditorMetadata editorMeta;
+    editorMeta.entityLayers = entityLayers_;
+    editorMeta.entityGroups = entityGroups_;
+    editorMeta.layerVisibility = layerVisibility_;
+    editorMeta.layerLocked = layerLocked_;
+    editorMeta.layerTint = layerTint_;
+    editorMeta.soloLayer = soloLayer_;
+    editorMeta.groupFilter = groupFilter_;
+
+    const auto err = serial::saveProject(scene_, materialLibrary_, editorMeta, currentFile_);
+    if (err.empty()) {
         setStatus(std::format("Saved → {}", currentFile_.string()));
+        // Push a checkpoint to the undo stack
+        serial::ProjectData checkpoint{scene_, materialLibrary_, editorMeta, {}};
+        undoStack_.push("Save Scene", checkpoint);
+    }
     else
         setStatus(std::format("Save failed: {}", err));
 }
@@ -3696,31 +4287,37 @@ void EditorApp::openScene() {
         { "FORGE Scene", "*.forge", "All Files", "*" }).result();
     if (sel.empty()) return;
     const auto path = std::filesystem::path(sel[0]);
-    auto result = serial::loadScene(path);
+    auto result = serial::loadProject(path);
     if (result) {
-        scene_ = std::move(*result);
+        scene_ = std::move(result->scene);
+        materialLibrary_ = std::move(result->materials);
         selection_.clear(); faceSelection_.clear(); vertexSelection_.clear();
         commands_.clear(); gpuData_.clear();
-        entityLayers_.clear();
-        entityGroups_.clear();
+        entityLayers_ = std::move(result->editor.entityLayers);
+        entityGroups_ = std::move(result->editor.entityGroups);
         hiddenEntities_.clear();
         isolatedEntities_.clear();
-        layerVisibility_.clear();
-        layerLocked_.clear();
-        layerTint_.clear();
-        soloLayer_.clear();
-        groupFilter_.clear();
-        layerVisibility_["Default"] = true;
-        layerLocked_["Default"] = false;
-        layerTint_["Default"] = {1.f, 1.f, 1.f};
+        layerVisibility_ = std::move(result->editor.layerVisibility);
+        layerLocked_ = std::move(result->editor.layerLocked);
+        layerTint_ = std::move(result->editor.layerTint);
+        soloLayer_ = std::move(result->editor.soloLayer);
+        groupFilter_ = std::move(result->editor.groupFilter);
+
+        if (!layerVisibility_.contains("Default")) layerVisibility_["Default"] = true;
+        if (!layerLocked_.contains("Default")) layerLocked_["Default"] = false;
+        if (!layerTint_.contains("Default")) layerTint_["Default"] = {1.f, 1.f, 1.f};
+
         for (const auto& [id, _] : scene_.entities) {
-            entityLayers_[id] = "Default";
-            entityGroups_[id] = "";
+            if (!entityLayers_.contains(id)) entityLayers_[id] = "Default";
+            if (!entityGroups_.contains(id)) entityGroups_[id] = "";
         }
         rebuildAllMeshes();
         camera_.frameAABB(scene_.worldBounds());
         currentFile_ = path;
-        setStatus(std::format("Opened '{}'", path.string()));
+        if (!result->schemaNote.empty())
+            setStatus(std::format("Opened '{}' ({})", path.string(), result->schemaNote));
+        else
+            setStatus(std::format("Opened '{}'", path.string()));
     } else {
         setStatus(std::format("Open failed: {}", result.error()));
     }
@@ -4489,18 +5086,63 @@ void EditorApp::drawPrefabBrowser() {
 
 namespace forge::editor {
 
+static bool navigateToValidationEntity(
+    const ValidationIssue& issue,
+    scene::Scene& scene,
+    MultiSelection& selection,
+    FaceSelection& faceSelection,
+    VertexSelection& vertexSelection,
+    gfx::OrbitCamera& camera,
+    std::string& statusMessage,
+    float& statusTimer) {
+    if (issue.entityId == scene::kInvalidEntityId) {
+        statusMessage = "Validation issue is scene-wide (no single target entity).";
+        statusTimer = 2.0f;
+        return false;
+    }
+
+    const auto* entity = scene.getEntity(issue.entityId);
+    if (!entity) {
+        statusMessage = std::format("Validation target '{}' not found in scene.", issue.entity);
+        statusTimer = 2.0f;
+        return false;
+    }
+
+    selection.clear();
+    selection.add(issue.entityId);
+    faceSelection.clear();
+    vertexSelection.clear();
+
+    const geo::AABB bounds = entityWorldBounds(*entity);
+    if (bounds.isValid()) camera.frameAABB(bounds);
+
+    statusMessage = std::format("Validation focus: {}", issue.entity);
+    statusTimer = 2.0f;
+    return true;
+}
+
 // ─── Level validation panel ───────────────────────────────────────────────────
 
 void EditorApp::runValidation() {
     lastValidation_ = validateScene(scene_, materialLibrary_);
     showValidation_ = true;
+    // Seed keyboard focus on first error, then first warning, then 0.
+    validationFocusIdx_ = -1;
+    for (int i = 0; i < static_cast<int>(lastValidation_.issues.size()); ++i) {
+        if (lastValidation_.issues[i].level == ValidationIssue::Level::Error) {
+            validationFocusIdx_ = i;
+            break;
+        }
+    }
+    if (validationFocusIdx_ < 0 && !lastValidation_.issues.empty())
+        validationFocusIdx_ = 0;
     const std::size_t errs = lastValidation_.errorCount();
     const std::size_t warn = lastValidation_.warningCount();
     if (errs > 0)
-        setStatus(std::format("Validation: {} errors, {} warnings. ({} ms)", 
+        setStatus(std::format("Validation: {} errors, {} warnings. ({} ms)",
             errs, warn, lastValidation_.validationTime.count()));
     else if (warn > 0)
-        setStatus(std::format("Validation passed with {} warnings. ({} ms)", 
+        setStatus(std::format("Validation passed with {} warnings. ({} ms)",
             warn, lastValidation_.validationTime.count()));
     else
         setStatus("Validation passed — scene is clean.");
@@ -4510,7 +5152,7 @@ void EditorApp::drawValidationPanel() {
     ImGui::SetNextWindowSize({440.f, 360.f}, ImGuiCond_FirstUseEver);
     ImGui::Begin("Validation", &showValidation_);
 
-    if (ImGui::Button("Run Validation", {-1.f, 0.f})) runValidation();
+    if (ImGui::Button("Run Validation (F9)", {-1.f, 0.f})) runValidation();
     ImGui::Separator();
 
     if (lastValidation_.issues.empty()) {
@@ -4534,31 +5176,70 @@ void EditorApp::drawValidationPanel() {
         ImGui::TextColored({0.6f,0.8f,1.f,1.f}, "[i] %zu info", info);
     ImGui::Separator();
 
-    // Issue list
-    ImGui::BeginChild("##issues", {0.f, 0.f}, false);
-    for (const auto& issue : lastValidation_.issues) {
+    // Issue list — keyboard-navigable child window
+    const int issueCount = static_cast<int>(lastValidation_.issues.size());
+    ImGui::BeginChild("##issues", {0.f, -ImGui::GetFrameHeightWithSpacing()}, false);
+
+    // Handle Up/Down/Enter when this child (or its parent panel) has focus
+    bool scrollToFocused = false;
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, /*repeat=*/true)) {
+            if (validationFocusIdx_ > 0) { --validationFocusIdx_; scrollToFocused = true; }
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, /*repeat=*/true)) {
+            if (validationFocusIdx_ < issueCount - 1) { ++validationFocusIdx_; scrollToFocused = true; }
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter) && validationFocusIdx_ >= 0 && validationFocusIdx_ < issueCount) {
+            navigateToValidationEntity(lastValidation_.issues[validationFocusIdx_],
+                scene_, selection_, faceSelection_, vertexSelection_,
+                camera_, statusMessage_, statusTimer_);
+        }
+    }
+
+    for (int i = 0; i < issueCount; ++i) {
+        const auto& issue = lastValidation_.issues[i];
+        const bool isSelected = (i == validationFocusIdx_);
+
         ImVec4 col;
         switch (issue.level) {
-        case ValidationIssue::Level::Error:
-            col = {1.f,0.4f,0.4f,1.f}; break;
-        case ValidationIssue::Level::Warning:
-            col = {1.f,0.85f,0.3f,1.f}; break;
-        default:
-            col = {0.65f,0.85f,1.f,1.f}; break;
+        case ValidationIssue::Level::Error:   col = {1.f,0.4f,0.4f,1.f}; break;
+        case ValidationIssue::Level::Warning: col = {1.f,0.85f,0.3f,1.f}; break;
+        default:                              col = {0.65f,0.85f,1.f,1.f}; break;
         }
 
+        std::string label;
+        if (!issue.entity.empty() && issue.entity != "scene")
+            label = std::format("{} [{}] {}", issue.levelIcon(), issue.entity, issue.message);
+        else
+            label = std::format("{} {}", issue.levelIcon(), issue.message);
+
+        ImGui::PushID(i);
         ImGui::PushStyleColor(ImGuiCol_Text, col);
-        ImGui::TextUnformatted(issue.levelIcon());
+        const bool clicked = ImGui::Selectable(label.c_str(), isSelected,
+            ImGuiSelectableFlags_AllowDoubleClick);
         ImGui::PopStyleColor();
 
-        ImGui::SameLine();
-        if (!issue.entity.empty() && issue.entity != "scene") {
-            ImGui::TextDisabled("[%s]", issue.entity.c_str());
-            ImGui::SameLine();
+        // Auto-scroll to the keyboard-focused row
+        if (isSelected && scrollToFocused)
+            ImGui::SetScrollHereY(0.5f);
+
+        if (ImGui::IsItemHovered()) {
+            if (issue.entityId == scene::kInvalidEntityId)
+                ImGui::SetTooltip("Scene-wide issue (no single entity target)");
+            else
+                ImGui::SetTooltip("Click or Enter to select and frame entity");
         }
-        ImGui::TextWrapped("%s", issue.message.c_str());
+
+        if (clicked) {
+            validationFocusIdx_ = i;
+            navigateToValidationEntity(issue, scene_, selection_, faceSelection_, vertexSelection_,
+                camera_, statusMessage_, statusTimer_);
+        }
+        ImGui::PopID();
     }
     ImGui::EndChild();
+
+    ImGui::TextDisabled("Up/Down navigate   Enter jump   Click select+frame");
     ImGui::End();
 }
 
@@ -4612,6 +5293,233 @@ void EditorApp::nudgeSelection(const glm::dvec3& delta) {
     commands_.push(std::move(cmd), scene_);
     rebuildAllMeshes();
     setStatus(std::format("Moved {} entities by ({:.0f}, {:.0f}, {:.0f})", count, delta.x, delta.y, delta.z));
+}
+
+void EditorApp::dropSelectionToSurface() {
+    if (selection_.empty()) return;
+
+    std::unordered_set<scene::EntityId> selectedSet(selection_.ids.begin(), selection_.ids.end());
+    std::vector<scene::EntityId> movableIds;
+    movableIds.reserve(selection_.ids.size());
+    for (auto id : selection_.ids)
+        if (entityVisibleInEditor(id) && !entityLockedByLayer(id))
+            movableIds.push_back(id);
+
+    if (movableIds.empty()) {
+        setStatus("Drop to Surface: no movable entities in selection.");
+        return;
+    }
+
+    bool foundSupport = false;
+    double chosenDeltaY = std::numeric_limits<double>::lowest();
+
+    for (auto id : movableIds) {
+        const auto* entity = scene_.getEntity(id);
+        if (!entity) continue;
+        const geo::AABB bounds = entityWorldBounds(*entity);
+        if (!bounds.isValid()) continue;
+
+        const glm::vec3 origin{
+            static_cast<float>((bounds.mins.x + bounds.maxs.x) * 0.5),
+            static_cast<float>(bounds.mins.y + 0.001),
+            static_cast<float>((bounds.mins.z + bounds.maxs.z) * 0.5),
+        };
+        const glm::vec3 dir{0.f, -1.f, 0.f};
+        const auto hit = raycastBrushFaces(scene_, origin, dir, selectedSet);
+        if (!hit.has_value()) continue;
+
+        const double hitY = static_cast<double>(origin.y) - static_cast<double>(*hit);
+        const double deltaY = hitY - bounds.mins.y;
+        if (!foundSupport || deltaY > chosenDeltaY) {
+            chosenDeltaY = deltaY;
+            foundSupport = true;
+        }
+    }
+
+    if (!foundSupport) {
+        setStatus("Drop to Surface: no supporting geometry found below selection.");
+        return;
+    }
+
+    if (std::abs(chosenDeltaY) < 1e-6) {
+        setStatus("Drop to Surface: selection already resting on geometry.");
+        return;
+    }
+
+    auto cmd = std::make_unique<BatchMoveCommand>();
+    cmd->entries.reserve(movableIds.size());
+    for (auto id : movableIds)
+        cmd->entries.push_back({ id, {0.0, chosenDeltaY, 0.0} });
+
+    const std::size_t count = cmd->entries.size();
+    commands_.push(std::move(cmd), scene_);
+    rebuildAllMeshes();
+    setStatus(std::format("Dropped {} entities to surface ({:.2f} on Y).", count, chosenDeltaY));
+}
+
+void EditorApp::snapSelectionToGeometryAxis(int axis) {
+    if (selection_.empty() || axis < 0 || axis > 2) return;
+
+    std::unordered_set<scene::EntityId> selectedSet(selection_.ids.begin(), selection_.ids.end());
+    std::vector<scene::EntityId> movableIds;
+    movableIds.reserve(selection_.ids.size());
+    geo::AABB selBounds;
+
+    for (auto id : selection_.ids) {
+        if (!entityVisibleInEditor(id) || entityLockedByLayer(id)) continue;
+        auto* e = scene_.getEntity(id);
+        if (!e) continue;
+        const geo::AABB b = entityWorldBounds(*e);
+        if (!b.isValid()) continue;
+        movableIds.push_back(id);
+        selBounds.expand(b);
+    }
+
+    if (movableIds.empty() || !selBounds.isValid()) {
+        setStatus("Geometry Snap: no movable entities with valid bounds.");
+        return;
+    }
+
+    const int a1 = (axis + 1) % 3;
+    const int a2 = (axis + 2) % 3;
+    const std::array<double, 3> s1 = {
+        selBounds.mins[a1],
+        (selBounds.mins[a1] + selBounds.maxs[a1]) * 0.5,
+        selBounds.maxs[a1]
+    };
+    const std::array<double, 3> s2 = {
+        selBounds.mins[a2],
+        (selBounds.mins[a2] + selBounds.maxs[a2]) * 0.5,
+        selBounds.maxs[a2]
+    };
+
+    bool found = false;
+    double bestDelta = 0.0;
+    double bestAbs = std::numeric_limits<double>::max();
+
+    for (int sign : {-1, 1}) {
+        const double boundary = sign < 0 ? selBounds.mins[axis] : selBounds.maxs[axis];
+        glm::vec3 dir{0.f, 0.f, 0.f};
+        dir[axis] = static_cast<float>(sign);
+
+        for (double v1 : s1) {
+            for (double v2 : s2) {
+                glm::vec3 origin{0.f, 0.f, 0.f};
+                origin[axis] = static_cast<float>(boundary);
+                origin[a1] = static_cast<float>(v1);
+                origin[a2] = static_cast<float>(v2);
+
+                const auto hit = raycastBrushFaces(scene_, origin, dir, selectedSet);
+                if (!hit.has_value()) continue;
+
+                const double delta = static_cast<double>(sign) * static_cast<double>(*hit);
+                const double absDelta = std::abs(delta);
+                if (absDelta < bestAbs) {
+                    bestAbs = absDelta;
+                    bestDelta = delta;
+                    found = true;
+                }
+            }
+        }
+    }
+
+    if (!found) {
+        static constexpr const char* axisName[] = { "X", "Y", "Z" };
+        setStatus(std::format("Geometry Snap {}: no nearby geometry hit.", axisName[axis]));
+        return;
+    }
+
+    if (std::abs(bestDelta) < 1e-6) {
+        setStatus("Geometry Snap: selection already touching geometry on chosen axis.");
+        return;
+    }
+
+    glm::dvec3 delta{0.0, 0.0, 0.0};
+    delta[axis] = bestDelta;
+    auto cmd = std::make_unique<BatchMoveCommand>();
+    cmd->entries.reserve(movableIds.size());
+    for (auto id : movableIds)
+        cmd->entries.push_back({ id, delta });
+
+    const std::size_t count = cmd->entries.size();
+    commands_.push(std::move(cmd), scene_);
+    rebuildAllMeshes();
+
+    static constexpr const char* axisName[] = { "X", "Y", "Z" };
+    setStatus(std::format("Geometry Snap {} moved {} entities by {:.2f}.",
+        axisName[axis], count, bestDelta));
+}
+
+void EditorApp::alignSelection(int axis, int mode) {
+    // Requires at least two entities; primary is the alignment reference.
+    if (selection_.ids.size() < 2) return;
+
+    auto* primaryEntity = scene_.getEntity(selection_.primary());
+    if (!primaryEntity) return;
+
+    // Compute the reference value from the primary entity's world bounds.
+    auto refBounds = [&](scene::EntityId id) -> geo::AABB {
+        auto* e = scene_.getEntity(id);
+        if (!e) return {};
+        if (const auto* be = std::get_if<scene::BrushEntity>(e))
+            return be->worldBounds();
+        if (const auto* pe = std::get_if<scene::PointEntity>(e)) {
+            geo::AABB b; b.expand(pe->transform.translation); return b;
+        }
+        if (const auto* me = std::get_if<scene::MeshEntity>(e)) {
+            geo::AABB b; b.expand(me->transform.translation); return b;
+        }
+        return {};
+    };
+
+    const geo::AABB primBounds = refBounds(selection_.primary());
+    if (!primBounds.isValid()) { setStatus("Cannot align: primary entity has no bounds."); return; }
+
+    // Determine the reference coordinate from primary bounds.
+    double refCoord = 0.0;
+    if (mode == 0)      refCoord = primBounds.mins[axis];   // min edge
+    else if (mode == 1) refCoord = (primBounds.mins[axis] + primBounds.maxs[axis]) * 0.5; // center
+    else                refCoord = primBounds.maxs[axis];   // max edge
+
+    std::vector<BatchMoveCommand::Entry> entries;
+    entries.reserve(selection_.ids.size());
+
+    for (auto id : selection_.ids) {
+        if (id == selection_.primary()) continue;
+        if (!entityVisibleInEditor(id) || entityLockedByLayer(id)) continue;
+
+        auto* e = scene_.getEntity(id);
+        if (!e) continue;
+
+        const geo::AABB bounds = refBounds(id);
+        if (!bounds.isValid()) continue;
+
+        // Compute the current axis value for this entity's chosen edge/center.
+        double curCoord = 0.0;
+        if (mode == 0)      curCoord = bounds.mins[axis];
+        else if (mode == 1) curCoord = (bounds.mins[axis] + bounds.maxs[axis]) * 0.5;
+        else                curCoord = bounds.maxs[axis];
+
+        const double delta = refCoord - curCoord;
+        if (std::abs(delta) < 1e-6) continue;   // already aligned
+
+        glm::dvec3 move{0.0, 0.0, 0.0};
+        move[axis] = delta;
+        entries.push_back({ id, move });
+    }
+
+    if (entries.empty()) { setStatus("All entities already aligned."); return; }
+
+    auto cmd = std::make_unique<BatchMoveCommand>();
+    cmd->entries = std::move(entries);
+    const std::size_t count = cmd->entries.size();
+    commands_.push(std::move(cmd), scene_);
+    rebuildAllMeshes();
+
+    static constexpr const char* axisName[] = { "X", "Y", "Z" };
+    static constexpr const char* modeName[] = { "min", "center", "max" };
+    setStatus(std::format("Aligned {} entities to {} {} of primary.",
+        count, axisName[axis], modeName[mode]));
 }
 
 void EditorApp::hideSelection() {
@@ -4751,10 +5659,9 @@ void EditorApp::drawMeshEntities(const gfx::RenderFrame& frame) {
         }
     }
 }
-
+// ─── Phase 11 additions ───────────────────────────────────────────────────────
 } // namespace forge::editor — Phase 10 additions
 
-// ─── Phase 11 additions ───────────────────────────────────────────────────────
 
 namespace forge::editor {
 

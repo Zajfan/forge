@@ -38,14 +38,14 @@ std::size_t ValidationReport::infoCount() const noexcept {
 
 using Level = ValidationIssue::Level;
 
-static void addError  (ValidationReport& r, std::string ent, std::string msg) {
-    r.issues.push_back({ Level::Error,   std::move(ent), std::move(msg) });
+static void addError(ValidationReport& r, scene::EntityId id, std::string ent, std::string msg) {
+    r.issues.push_back({ Level::Error, id, std::move(ent), std::move(msg) });
 }
-static void addWarning(ValidationReport& r, std::string ent, std::string msg) {
-    r.issues.push_back({ Level::Warning, std::move(ent), std::move(msg) });
+static void addWarning(ValidationReport& r, scene::EntityId id, std::string ent, std::string msg) {
+    r.issues.push_back({ Level::Warning, id, std::move(ent), std::move(msg) });
 }
-static void addInfo   (ValidationReport& r, std::string ent, std::string msg) {
-    r.issues.push_back({ Level::Info,    std::move(ent), std::move(msg) });
+static void addInfo(ValidationReport& r, scene::EntityId id, std::string ent, std::string msg) {
+    r.issues.push_back({ Level::Info, id, std::move(ent), std::move(msg) });
 }
 
 // ─── validateScene ────────────────────────────────────────────────────────────
@@ -74,7 +74,7 @@ ValidationReport validateScene(const scene::Scene& scene,
         // ── Duplicate names (warning) ────────────────────────────────────────
         if (!name.empty()) {
             if (names.contains(name)) {
-                addWarning(report, name,
+                addWarning(report, id, name,
                     std::format("Duplicate entity name '{}'.", name));
             } else {
                 names.insert(name);
@@ -91,20 +91,20 @@ ValidationReport validateScene(const scene::Scene& scene,
                 const bool outY = wb.maxs.y >  kWorldBound || wb.mins.y < -kWorldBound;
                 const bool outZ = wb.maxs.z >  kWorldBound || wb.mins.z < -kWorldBound;
                 if (outX || outY || outZ)
-                    addWarning(report, name,
+                    addWarning(report, id, name,
                         std::format("Entity extends outside world bounds (±{} units).",
                             (int)kWorldBound));
             }
 
             // Empty entity
             if (be->brushes.empty()) {
-                addError(report, name, "BrushEntity has no brushes.");
+                addError(report, id, name, "BrushEntity has no brushes.");
                 continue;
             }
 
             // Large entity warning
             if (be->brushes.size() > kBrushSplitWarn)
-                addWarning(report, name,
+                addWarning(report, id, name,
                     std::format("Entity has {} brushes — consider splitting for performance.",
                         be->brushes.size()));
 
@@ -116,7 +116,7 @@ ValidationReport validateScene(const scene::Scene& scene,
                 const auto result = brush.validate();
                 if (!result.valid) {
                     for (const auto& err : result.errors)
-                        addError(report, name,
+                        addError(report, id, name,
                             std::format("Brush '{}': {}", brush.id, err));
                 }
 
@@ -124,7 +124,7 @@ ValidationReport validateScene(const scene::Scene& scene,
                 std::set<std::string> brushMaterials;
                 for (const auto& face : brush.faces) {
                     if (face.materialId.empty()) {
-                        addWarning(report, name,
+                        addWarning(report, id, name,
                             std::format("Brush '{}' has a face with empty materialId.",
                                 brush.id));
                     } else {
@@ -135,7 +135,7 @@ ValidationReport validateScene(const scene::Scene& scene,
                 // Check if all materials exist in library
                 for (const auto& matId : brushMaterials) {
                     if (!materials.getMaterial(matId)) {
-                        addError(report, name,
+                        addError(report, id, name,
                             std::format("Brush '{}' references missing material '{}'.",
                                 brush.id, matId));
                     }
@@ -147,7 +147,7 @@ ValidationReport validateScene(const scene::Scene& scene,
                     const auto& poly = brush.facePolygon(faceIdx);
                     if (poly.size() < 3) {
                         ++orphanedFaceCount;
-                        addWarning(report, name,
+                        addWarning(report, id, name,
                             std::format("Brush '{}' face {} is degenerate (< 3 vertices).",
                                 brush.id, faceIdx));
                     }
@@ -178,7 +178,7 @@ ValidationReport validateScene(const scene::Scene& scene,
 
                     if (!connected) {
                         ++disjointBrushCount;
-                        addWarning(report, name,
+                        addWarning(report, id, name,
                             std::format("Brush '{}' is disconnected from other brushes in entity.",
                                 brush.id));
                     }
@@ -197,7 +197,7 @@ ValidationReport validateScene(const scene::Scene& scene,
             if (std::abs(t.x) > kWorldBound ||
                 std::abs(t.y) > kWorldBound ||
                 std::abs(t.z) > kWorldBound) {
-                addWarning(report, name,
+                addWarning(report, id, name,
                     std::format("Point entity '{}' is outside world bounds.",
                         pe->classname));
             }
@@ -207,35 +207,35 @@ ValidationReport validateScene(const scene::Scene& scene,
     // ── Global checks ────────────────────────────────────────────────────────
 
     if (!hasPlayerStart) {
-        addError(report, "scene",
+        addError(report, scene::kInvalidEntityId, "scene",
             "No 'info_player_start' entity found — player has no spawn point.");
     }
 
     if (totalBrushes > kBrushWarn) {
-        addWarning(report, "scene",
+        addWarning(report, scene::kInvalidEntityId, "scene",
             std::format("{} total brushes — consider reducing geometry complexity.",
                 totalBrushes));
     }
 
     if (scene.entityCount() == 0) {
-        addWarning(report, "scene", "Scene is empty.");
+        addWarning(report, scene::kInvalidEntityId, "scene", "Scene is empty.");
     }
 
     // ── Statistics (info) ────────────────────────────────────────────────────
 
-    addInfo(report, "scene",
+    addInfo(report, scene::kInvalidEntityId, "scene",
         std::format("{} entities, {} brushes, {} faces.",
             totalEntities, totalBrushes, totalFaces));
 
     if (orphanedFaceCount > 0 || disjointBrushCount > 0) {
-        addInfo(report, "scene",
+        addInfo(report, scene::kInvalidEntityId, "scene",
             std::format("{} orphaned faces, {} disjoint brushes detected.",
                 orphanedFaceCount, disjointBrushCount));
     }
 
     const auto brushStats = scene.stats();
     if (brushStats.pointEntityCount > 0)
-        addInfo(report, "scene",
+        addInfo(report, scene::kInvalidEntityId, "scene",
             std::format("{} point entities, {} brush entities, {} mesh entities.",
                 brushStats.pointEntityCount,
                 brushStats.brushEntityCount,
@@ -245,7 +245,7 @@ ValidationReport validateScene(const scene::Scene& scene,
     const auto end = std::chrono::high_resolution_clock::now();
     report.validationTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
-    addInfo(report, "scene",
+    addInfo(report, scene::kInvalidEntityId, "scene",
         std::format("Validation completed in {}ms.", report.validationTime.count()));
 
     return report;

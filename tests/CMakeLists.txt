@@ -50,6 +50,22 @@ catch_discover_tests(test-scene
     REPORTER     console
 )
 
+# ── Serialisation tests ──────────────────────────────────────────────────────
+add_executable(test-serial
+    scene/test_serial_project.cpp
+)
+
+target_link_libraries(test-serial
+    PRIVATE
+        forge::serial
+        Catch2::Catch2WithMain
+)
+
+catch_discover_tests(test-serial
+    TEST_PREFIX  "serial."
+    REPORTER     console
+)
+
 # ── Export tests ──────────────────────────────────────────────────────────────
 add_executable(test-export
     export/test_export.cpp

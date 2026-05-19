@@ -73,6 +73,23 @@ void MaterialLibrary::addMaterial(const std::shared_ptr<Material>& material) {
     }
 }
 
+bool MaterialLibrary::removeMaterial(const std::string& name) {
+    return materials_.erase(name) > 0;
+}
+
+bool MaterialLibrary::renameMaterial(const std::string& oldName, const std::string& newName) {
+    if (oldName.empty() || newName.empty() || oldName == newName) return false;
+    auto it = materials_.find(oldName);
+    if (it == materials_.end()) return false;
+    if (materials_.contains(newName)) return false;
+
+    auto material = it->second;
+    materials_.erase(it);
+    material->name = newName;
+    materials_[newName] = std::move(material);
+    return true;
+}
+
 std::shared_ptr<Material> MaterialLibrary::getMaterial(const std::string& name) {
     auto it = materials_.find(name);
     return it != materials_.end() ? it->second : nullptr;

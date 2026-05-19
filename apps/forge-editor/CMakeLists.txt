@@ -11,6 +11,8 @@ add_executable(forge-editor
     PrefabSystem.cpp
     LevelValidator.cpp
     MaterialEditor.cpp
+    UndoStack.cpp
+    PropertyInspector.cpp
 )
 
 target_include_directories(forge-editor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${LUA_INCLUDE_DIR} ${PFD_INCLUDE_DIR})

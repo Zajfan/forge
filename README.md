@@ -70,6 +70,7 @@ ctest --test-dir build --output-on-failure
 ## Architecture
 
 See [`docs/FORGE_ARCHITECTURE_CPP23.md`](docs/FORGE_ARCHITECTURE_CPP23.md).
+Editor usage guide: [`docs/EDITOR_TOOL_FIELD_GUIDE.md`](docs/EDITOR_TOOL_FIELD_GUIDE.md).
 
 ```
 forge/

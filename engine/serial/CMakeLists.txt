@@ -15,6 +15,7 @@ target_include_directories(forge-serial
 target_link_libraries(forge-serial
     PUBLIC
         forge::scene
+        forge::gfx
         forge_compile_options
     PRIVATE
         nlohmann_json::nlohmann_json

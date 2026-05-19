@@ -14,6 +14,7 @@ struct ValidationIssue {
     enum class Level { Info, Warning, Error };
 
     Level       level;
+    scene::EntityId entityId = scene::kInvalidEntityId;
     std::string entity;    ///< Entity name / id  ("scene" for global issues)
     std::string message;
 

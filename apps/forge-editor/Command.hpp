@@ -6,6 +6,8 @@
 #include <format>
 #include <memory>
 #include <string>
+#include <optional>
+#include <algorithm>
 #include <unordered_map>
 #include <vector>
 
@@ -38,6 +40,15 @@ public:
     [[nodiscard]] bool canRedo() const noexcept { return cursor_ < history_.size(); }
     [[nodiscard]] std::string lastUndoLabel() const { return canUndo() ? history_[cursor_-1]->describe() : ""; }
     [[nodiscard]] std::string lastRedoLabel() const { return canRedo() ? history_[cursor_]->describe()   : ""; }
+    [[nodiscard]] std::vector<std::string> recentUndoLabels(std::size_t maxCount = 3) const {
+        std::vector<std::string> labels;
+        const std::size_t count = std::min(maxCount, cursor_);
+        labels.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            labels.push_back(history_[cursor_ - 1 - i]->describe());
+        }
+        return labels;
+    }
     [[nodiscard]] std::size_t size()   const noexcept { return history_.size(); }
     [[nodiscard]] std::size_t cursor() const noexcept { return cursor_; }
     void clear() noexcept { history_.clear(); cursor_ = 0; }
@@ -221,6 +232,170 @@ private:
     void setGroup(scene::Scene& s, const std::string& value) {
         if (!s.hasEntity(entityId)) return;
         entityGroups[entityId] = value;
+    }
+};
+
+// ─── Set entity property value ──────────────────────────────────────────────
+
+struct SetEntityPropertyCommand final : Command {
+    scene::EntityId           entityId = scene::kInvalidEntityId;
+    std::string               key;
+    std::optional<scene::PropertyValue> oldValue;
+    scene::PropertyValue      newValue;
+
+    SetEntityPropertyCommand(
+        scene::EntityId id,
+        std::string propertyKey,
+        std::optional<scene::PropertyValue> oldPropertyValue,
+        scene::PropertyValue newPropertyValue)
+        : entityId(id)
+        , key(std::move(propertyKey))
+        , oldValue(std::move(oldPropertyValue))
+        , newValue(std::move(newPropertyValue)) {}
+
+    void execute(scene::Scene& s) override {
+        if (auto* props = propertiesForEntity(s, entityId)) {
+            (*props)[key] = newValue;
+        }
+    }
+
+    void undo(scene::Scene& s) override {
+        if (auto* props = propertiesForEntity(s, entityId)) {
+            if (oldValue.has_value()) {
+                (*props)[key] = *oldValue;
+            } else {
+                props->erase(key);
+            }
+        }
+    }
+
+    std::string describe() const override {
+        return std::format("Set property '{}'", key);
+    }
+
+private:
+    static std::unordered_map<std::string, scene::PropertyValue>*
+    propertiesForEntity(scene::Scene& s, scene::EntityId id) {
+        auto* e = s.getEntity(id);
+        if (!e) return nullptr;
+        if (auto* be = std::get_if<scene::BrushEntity>(e)) return &be->properties;
+        if (auto* pe = std::get_if<scene::PointEntity>(e)) return &pe->properties;
+        return nullptr;
+    }
+};
+
+// ─── Set brush bool field (solid/visible) ───────────────────────────────────
+
+struct SetBrushBoolCommand final : Command {
+    enum class Field { Solid, Visible };
+
+    scene::EntityId entityId = scene::kInvalidEntityId;
+    Field           field = Field::Solid;
+    bool            oldValue = false;
+    bool            newValue = false;
+
+    SetBrushBoolCommand(scene::EntityId id, Field f, bool oldV, bool newV)
+        : entityId(id), field(f), oldValue(oldV), newValue(newV) {}
+
+    void execute(scene::Scene& s) override { apply(s, newValue); }
+    void undo(scene::Scene& s) override { apply(s, oldValue); }
+
+    std::string describe() const override {
+        const char* fieldName = (field == Field::Solid) ? "solid" : "visible";
+        return std::format("Set brush {} {}", fieldName, newValue ? "on" : "off");
+    }
+
+private:
+    void apply(scene::Scene& s, bool value) {
+        auto* e = s.getEntity(entityId);
+        auto* be = e ? std::get_if<scene::BrushEntity>(e) : nullptr;
+        if (!be) return;
+        if (field == Field::Solid) be->solid = value;
+        else be->visible = value;
+    }
+};
+
+// ─── Set brush classname (with property snapshots) ──────────────────────────
+
+struct SetBrushClassnameCommand final : Command {
+    scene::EntityId entityId = scene::kInvalidEntityId;
+    std::string oldClassname;
+    std::string newClassname;
+    std::unordered_map<std::string, scene::PropertyValue> oldProperties;
+    std::unordered_map<std::string, scene::PropertyValue> newProperties;
+
+    SetBrushClassnameCommand(
+        scene::EntityId id,
+        std::string oldCls,
+        std::string newCls,
+        std::unordered_map<std::string, scene::PropertyValue> oldProps,
+        std::unordered_map<std::string, scene::PropertyValue> newProps)
+        : entityId(id)
+        , oldClassname(std::move(oldCls))
+        , newClassname(std::move(newCls))
+        , oldProperties(std::move(oldProps))
+        , newProperties(std::move(newProps)) {}
+
+    void execute(scene::Scene& s) override { apply(s, newClassname, newProperties); }
+    void undo(scene::Scene& s) override { apply(s, oldClassname, oldProperties); }
+
+    std::string describe() const override {
+        return std::format("Set classname '{}'", newClassname);
+    }
+
+private:
+    void apply(
+        scene::Scene& s,
+        const std::string& classname,
+        const std::unordered_map<std::string, scene::PropertyValue>& properties)
+    {
+        auto* e = s.getEntity(entityId);
+        auto* be = e ? std::get_if<scene::BrushEntity>(e) : nullptr;
+        if (!be) return;
+        be->classname = classname;
+        be->properties = properties;
+    }
+};
+
+// ─── Set point classname (with property snapshots) ──────────────────────────
+
+struct SetPointClassnameCommand final : Command {
+    scene::EntityId entityId = scene::kInvalidEntityId;
+    std::string oldClassname;
+    std::string newClassname;
+    std::unordered_map<std::string, scene::PropertyValue> oldProperties;
+    std::unordered_map<std::string, scene::PropertyValue> newProperties;
+
+    SetPointClassnameCommand(
+        scene::EntityId id,
+        std::string oldCls,
+        std::string newCls,
+        std::unordered_map<std::string, scene::PropertyValue> oldProps,
+        std::unordered_map<std::string, scene::PropertyValue> newProps)
+        : entityId(id)
+        , oldClassname(std::move(oldCls))
+        , newClassname(std::move(newCls))
+        , oldProperties(std::move(oldProps))
+        , newProperties(std::move(newProps)) {}
+
+    void execute(scene::Scene& s) override { apply(s, newClassname, newProperties); }
+    void undo(scene::Scene& s) override { apply(s, oldClassname, oldProperties); }
+
+    std::string describe() const override {
+        return std::format("Set point classname '{}'", newClassname);
+    }
+
+private:
+    void apply(
+        scene::Scene& s,
+        const std::string& classname,
+        const std::unordered_map<std::string, scene::PropertyValue>& properties)
+    {
+        auto* e = s.getEntity(entityId);
+        auto* pe = e ? std::get_if<scene::PointEntity>(e) : nullptr;
+        if (!pe) return;
+        pe->classname = classname;
+        pe->properties = properties;
     }
 };
 

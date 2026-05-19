@@ -8,6 +8,8 @@
 #include "PrefabSystem.hpp"
 #include "LevelValidator.hpp"
 #include "MaterialEditor.hpp"
+#include "UndoStack.hpp"
+#include "PropertyInspector.hpp"
 #include <forge/bsp.hpp>
 #include <forge/audio.hpp>
 #include <forge/script.hpp>
@@ -132,6 +134,11 @@ private:
     void runValidation();
     void duplicateSelection();
     void nudgeSelection(const glm::dvec3& delta);
+    void dropSelectionToSurface();
+    void snapSelectionToGeometryAxis(int axis);
+    /// Align selected entities along @p axis (0=X,1=Y,2=Z) to @p mode
+    /// (0=min edge, 1=center, 2=max edge) of the primary entity's bounds.
+    void alignSelection(int axis, int mode);
     void hideSelection();
     void isolateSelection();
     void clearHiddenIsolation();
@@ -151,6 +158,8 @@ private:
 
     // ── Viewport helpers ──────────────────────────────────────────────────────
     void drawFaceOverlay   (ImVec2 pos, ImVec2 sz, const glm::mat4& vp);
+    void drawPaintHoverOverlay(ImVec2 pos, ImVec2 sz, const glm::mat4& vp);
+    void drawPaintDragOverlay(ImVec2 pos, ImVec2 sz, const glm::mat4& vp);
     void drawVertexOverlay (ImVec2 pos, ImVec2 sz, const glm::mat4& vp);
     void drawClipPreview   (ImVec2 pos, ImVec2 sz, const glm::mat4& vp);
     void drawBoxCreatePreview(ImVec2 pos, ImVec2 sz, const glm::mat4& vp);
@@ -184,6 +193,14 @@ private:
     // Validation
     ValidationReport lastValidation_;
     bool             showValidation_ = false;
+    int              validationFocusIdx_ = -1;
+
+    // Undo/Redo
+    UndoStack undoStack_;
+
+    // Panels
+    bool showPropertyInspector_ = false;
+    PropertyInspector inspector_;
 
     // BSP
     bsp::BSPTree        bspTree_;
@@ -235,6 +252,8 @@ private:
         std::vector<FaceSelection>     paintedFaces;     ///< accumulated faces during drag
         std::vector<std::string>       origMaterials;    ///< original materials for undo
     } paintDrag_;
+    std::optional<FaceHit> paintHoverFace_;
+    std::size_t paintDragQueueCap_ = 100;
     
     bool          showGrid_    = true;
     bool          wireframe_   = false;
